@@ -1,0 +1,29 @@
+name: Akula noq stream scheduling baseline
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - experiment/noq-path-affinity-priority-20261018
+
+permissions:
+  contents: read
+
+jobs:
+  baseline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with:
+          toolchain: stable
+      - name: Current priority ordering
+        run: cargo test --locked -p noq-proto --lib stream_priority -- --nocapture
+      - name: Current equal-priority fairness
+        run: cargo test --locked -p noq-proto --lib same_stream_priority -- --nocapture
+      - name: Multipath baseline
+        run: cargo test --locked -p noq-proto --lib tests::multipath -- --nocapture
+      - name: Protocol compile
+        run: cargo check --locked -p noq-proto
