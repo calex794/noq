@@ -563,7 +563,7 @@ impl StreamsState {
                 // will have a chance to write data before we touch this stream
                 // again.
                 self.pending
-                    .push_pending(id, stream.priority, stream.affinity);
+                    .push_pending(id, stream.priority, stream.affinity, stream.incremental);
             }
 
             let range = offsets.clone();
@@ -626,7 +626,7 @@ impl StreamsState {
         };
         if !stream.is_pending() {
             self.pending
-                .push_pending(frame.id, stream.priority, stream.affinity);
+                .push_pending(frame.id, stream.priority, stream.affinity, stream.incremental);
         }
         stream.fin_pending |= frame.fin;
         stream.pending.retransmit(frame.offsets);
@@ -646,7 +646,7 @@ impl StreamsState {
                 }
                 if !stream.is_pending() {
                     self.pending
-                        .push_pending(id, stream.priority, stream.affinity);
+                        .push_pending(id, stream.priority, stream.affinity, stream.incremental);
                 }
                 stream.pending.retransmit_all_for_0rtt();
             }
@@ -1417,10 +1417,10 @@ mod tests {
         let mut queue = PendingStreamsQueue::new();
         let ids = [0, 1, 2, 3].map(|i| StreamId::new(Side::Client, Dir::Uni, i));
         let path = PathId::ZERO;
-        queue.push_pending(ids[0], 0, Any);
-        queue.push_pending(ids[1], 0, Sticky(path));
-        queue.push_pending(ids[2], 0, Sticky(path));
-        queue.push_pending(ids[3], 1, Sticky(path));
+        queue.push_pending(ids[0], 0, Any, true);
+        queue.push_pending(ids[1], 0, Sticky(path), true);
+        queue.push_pending(ids[2], 0, Sticky(path), true);
+        queue.push_pending(ids[3], 1, Sticky(path), true);
         assert_eq!(queue.pop(path, true).unwrap().id, ids[3]);
 
         // One Any stream and two sticky streams get equal turns, not equal bucket shares.
@@ -1431,7 +1431,7 @@ mod tests {
                 (ids[2], Sticky(path)),
             ] {
                 assert_eq!(queue.pop(path, true).unwrap().id, id);
-                queue.push_pending(id, 0, affinity);
+                queue.push_pending(id, 0, affinity, true);
             }
         }
 

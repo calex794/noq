@@ -15,6 +15,7 @@ pub(super) struct Send {
     pub(super) state: SendState,
     pub(super) pending: SendBuffer,
     pub(super) priority: i32,
+    pub(super) incremental: bool,
     pub(super) affinity: StreamAffinity,
     /// Whether a frame containing a FIN bit must be transmitted.
     ///
@@ -33,6 +34,7 @@ impl Send {
             state: SendState::Ready,
             pending: SendBuffer::new(),
             priority: 0,
+            incremental: true,
             affinity: StreamAffinity::Any,
             fin_pending: false,
             connection_blocked: false,
