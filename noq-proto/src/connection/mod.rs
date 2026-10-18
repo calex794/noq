@@ -2469,7 +2469,10 @@ impl Connection {
     /// `Instant` that was output by `poll_timeout`; however spurious extra calls will simply
     /// no-op and therefore are safe.
     pub fn handle_timeout(&mut self, now: Instant) {
-        while let Some((timer, _time)) = self.timers.expire_before(now, &self.qlog) {
+        for timer in self.timers.expired(now) {
+            if !self.timers.expire(timer, now, &self.qlog) {
+                continue;
+            }
             let span = match timer {
                 Timer::Conn(timer) => trace_span!("timeout", scope = "conn", ?timer),
                 Timer::PerPath(path_id, timer) => {
