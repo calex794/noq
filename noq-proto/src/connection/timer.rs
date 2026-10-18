@@ -1,7 +1,7 @@
 #[cfg(test)]
 use alloc::vec::Vec;
 
-use identity_hash::IntMap;
+use identity_hash::{IdentityHashable, IntMap};
 
 use crate::{
     Instant,
