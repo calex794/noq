@@ -1784,6 +1784,87 @@ fn akula_bulk_payload_loss_recovery() -> TestResult {
     Ok(())
 }
 
+/// Deterministically lose every fifth outbound datagram while carrying 512 KiB
+/// over a pinned backup path and an urgent query over the default route.
+/// This tests recurring loss, unlike the first-burst-only recovery regression.
+#[test]
+fn akula_periodic_loss_512k_with_control() -> TestResult {
+    let _guard = subscribe();
+    let mut pair = ConnPair::builder().enable_multipath().connect();
+    let primary = PathId::ZERO;
+    let remote = pair.routes.public_server_addr();
+    let bulk_path = pair.open_path(
+        Client,
+        FourTuple::from_remote(remote),
+        PathStatus::Backup,
+    )?;
+    pair.drive();
+    assert_matches!(
+        pair.poll(Client),
+        Some(Event::Path(PathEvent::Established { id })) if id == bulk_path
+    );
+
+    pair.set_client_packet_loss_every(Some(5));
+    let control = pair.streams(Client).open(Dir::Uni).unwrap();
+    pair.send_stream(Client, control).set_priority(10)?;
+    pair.send_stream(Client, control).set_incremental(false)?;
+    pair.send_stream(Client, control).write(b"urgent status")?;
+    pair.send_stream(Client, control).finish()?;
+
+    let bulk = pair.streams(Client).open(Dir::Uni).unwrap();
+    pair.send_stream(Client, bulk).set_priority(-1)?;
+    pair.send_stream(Client, bulk).set_incremental(true)?;
+    pair.send_stream(Client, bulk)
+        .set_affinity(StreamAffinity::Sticky(bulk_path))?;
+    const BYTES: usize = 512 * 1024;
+    let payload: Vec<u8> = (0..BYTES)
+        .map(|i| ((i * 31 + 11) % 251) as u8)
+        .collect();
+    assert_eq!(pair.send_stream(Client, bulk).write(&payload)?, BYTES);
+    pair.send_stream(Client, bulk).finish()?;
+
+    let primary_before = pair.path_stats(Client, primary).unwrap().frame_tx.stream;
+    let bulk_before = pair.path_stats(Client, bulk_path).unwrap().frame_tx.stream;
+    pair.drive();
+
+    assert!(
+        pair.dropped_client_datagrams >= 10,
+        "packet fault injection did not run across the complete transfer"
+    );
+    assert!(
+        pair.path_stats(Client, primary).unwrap().frame_tx.stream > primary_before,
+        "urgent control must travel over the default route"
+    );
+    assert!(
+        pair.path_stats(Client, bulk_path).unwrap().frame_tx.stream > bulk_before,
+        "pinned bulk must travel over the selected route"
+    );
+    assert!(!pair.is_closed(Client));
+    assert!(!pair.is_closed(Server));
+
+    assert_eq!(pair.streams(Server).accept(Dir::Uni), Some(control));
+    let mut receiver = pair.recv_stream(Server, control);
+    let mut chunks = receiver.read(true)?;
+    assert_matches!(
+        chunks.next(usize::MAX),
+        Ok(Some(chunk)) if chunk.bytes == b"urgent status"[..]
+    );
+    assert_matches!(chunks.next(usize::MAX), Ok(None));
+    let _ = chunks.finalize();
+
+    assert_eq!(pair.streams(Server).accept(Dir::Uni), Some(bulk));
+    let mut receiver = pair.recv_stream(Server, bulk);
+    let mut chunks = receiver.read(true)?;
+    let mut result = Vec::new();
+    while let Some(chunk) = chunks.next(usize::MAX)? {
+        result.extend_from_slice(&chunk.bytes);
+    }
+    let _ = chunks.finalize();
+    assert_eq!(result.len(), BYTES);
+    assert_eq!(result, payload, "repeated packet loss must not alter bytes or order");
+    Ok(())
+}
+
 /// A stream pinned to a path that is abandoned must never silently fall back to
 /// another path. The application can explicitly retarget the buffered STREAM and FIN.
 #[test]
