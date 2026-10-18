@@ -1865,6 +1865,89 @@ fn akula_periodic_loss_512k_with_control() -> TestResult {
     Ok(())
 }
 
+/// A large file starts on a pinned route, delivers only its first QUIC flight,
+/// loses that route, then resumes on the original route after explicit retargeting.
+/// The application must not rewrite the stream or accept duplicate bytes.
+#[test]
+fn akula_midstream_route_loss_512k_requires_explicit_retarget() -> TestResult {
+    let _guard = subscribe();
+    let mut pair = ConnPair::builder().enable_multipath().connect();
+    let primary = PathId::ZERO;
+    let server_addr = pair.routes.public_server_addr();
+    let failing = pair.open_path(
+        Client,
+        FourTuple::from_remote(server_addr),
+        PathStatus::Backup,
+    )?;
+    pair.drive();
+    assert_matches!(
+        pair.poll(Client),
+        Some(Event::Path(PathEvent::Established { id })) if id == failing
+    );
+
+    let bulk = pair.streams(Client).open(Dir::Uni).unwrap();
+    pair.send_stream(Client, bulk)
+        .set_affinity(StreamAffinity::Sticky(failing))?;
+    pair.send_stream(Client, bulk).set_priority(-1)?;
+    pair.send_stream(Client, bulk).set_incremental(true)?;
+
+    const SIZE: usize = 512 * 1024;
+    let payload: Vec<u8> = (0..SIZE)
+        .map(|i| ((i * 13 + 97) % 251) as u8)
+        .collect();
+    assert_eq!(pair.send_stream(Client, bulk).write(&payload)?, SIZE);
+    pair.send_stream(Client, bulk).finish()?;
+
+    // The congestion window only allows a small portion of the file to leave
+    // on the first turn. Deliver it to the receiver before abandoning the route.
+    pair.drive_client();
+    pair.drive_server();
+    assert_eq!(pair.streams(Server).accept(Dir::Uni), Some(bulk));
+    let mut received = Vec::new();
+    {
+        let mut recv = pair.recv_stream(Server, bulk);
+        let mut chunks = recv.read(true)?;
+        while let Some(chunk) = chunks.next(usize::MAX)? {
+            received.extend_from_slice(&chunk.bytes);
+        }
+        let _ = chunks.finalize();
+    }
+    assert!(
+        !received.is_empty() && received.len() < SIZE,
+        "route failure must happen after some data arrived but before the file finished"
+    );
+    assert_eq!(received.as_slice(), &payload[..received.len()]);
+
+    let primary_before = pair.path_stats(Client, primary).unwrap().frame_tx.stream;
+    pair.close_path(Client, failing, 0u8.into())?;
+    pair.drive();
+    assert_eq!(
+        pair.path_stats(Client, primary).unwrap().frame_tx.stream,
+        primary_before,
+        "remaining file data must not silently cross an unauthorized route"
+    );
+    assert!(!pair.is_closed(Client));
+    assert!(!pair.is_closed(Server));
+
+    pair.send_stream(Client, bulk)
+        .set_affinity(StreamAffinity::Any)?;
+    pair.drive();
+    assert!(
+        pair.path_stats(Client, primary).unwrap().frame_tx.stream > primary_before,
+        "explicit retargeting must use the primary route"
+    );
+
+    let mut recv = pair.recv_stream(Server, bulk);
+    let mut chunks = recv.read(true)?;
+    while let Some(chunk) = chunks.next(usize::MAX)? {
+        received.extend_from_slice(&chunk.bytes);
+    }
+    let _ = chunks.finalize();
+    assert_eq!(received.len(), SIZE, "all bytes must arrive after route recovery");
+    assert_eq!(received, payload, "route recovery must not duplicate or corrupt content");
+    Ok(())
+}
+
 /// A stream pinned to a path that is abandoned must never silently fall back to
 /// another path. The application can explicitly retarget the buffered STREAM and FIN.
 #[test]

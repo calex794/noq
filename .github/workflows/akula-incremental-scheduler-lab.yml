@@ -25,5 +25,7 @@ jobs:
         run: cargo test --locked -p noq-proto --lib stream_affinity_ -- --nocapture
       - name: Large payload with forced packet loss
         run: cargo test --locked -p noq-proto --lib akula_bulk_payload_loss_recovery -- --nocapture
+      - name: Large file interrupted by route removal
+        run: cargo test --locked -p noq-proto --lib akula_midstream_route_loss_512k_requires_explicit_retarget -- --nocapture
       - name: Multipath regressions
         run: cargo test --locked -p noq-proto --lib tests::multipath -- --nocapture
