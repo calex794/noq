@@ -1702,6 +1702,88 @@ fn akula_ten_books_control_and_manual_route_recovery() -> TestResult {
     Ok(())
 }
 
+/// Exercise multi-packet retransmission after losing an entire outbound burst.
+///
+/// The 512 KiB body fits inside the default stream receive window, so this
+/// specifically measures loss recovery, not a sender waiting for application reads.
+#[test]
+fn akula_bulk_payload_loss_recovery() -> TestResult {
+    let _guard = subscribe();
+    let mut pair = ConnPair::builder().enable_multipath().connect();
+    let primary = PathId::ZERO;
+    let remote = pair.routes.public_server_addr();
+    let bulk_path = pair.open_path(
+        Client,
+        FourTuple::from_remote(remote),
+        PathStatus::Backup,
+    )?;
+    pair.drive();
+    assert_matches!(
+        pair.poll(Client),
+        Some(Event::Path(PathEvent::Established { id })) if id == bulk_path
+    );
+
+    let control = pair.streams(Client).open(Dir::Uni).unwrap();
+    pair.send_stream(Client, control).set_priority(10)?;
+    pair.send_stream(Client, control).set_incremental(false)?;
+    pair.send_stream(Client, control).write(b"urgent catalog query")?;
+    pair.send_stream(Client, control).finish()?;
+
+    let bulk = pair.streams(Client).open(Dir::Uni).unwrap();
+    pair.send_stream(Client, bulk).set_priority(-1)?;
+    pair.send_stream(Client, bulk).set_incremental(true)?;
+    pair.send_stream(Client, bulk)
+        .set_affinity(StreamAffinity::Sticky(bulk_path))?;
+
+    const BYTES: usize = 512 * 1024;
+    let payload: Vec<u8> = (0..BYTES)
+        .map(|i| ((i * 17 + 3) % 251) as u8)
+        .collect();
+    assert_eq!(pair.send_stream(Client, bulk).write(&payload)?, BYTES);
+    pair.send_stream(Client, bulk).finish()?;
+
+    let primary_before = pair.path_stats(Client, primary).unwrap().frame_tx.stream;
+    let bulk_before = pair.path_stats(Client, bulk_path).unwrap().frame_tx.stream;
+    // Both streams start sending, but the server loses the first complete burst.
+    pair.drive_client();
+    assert!(
+        pair.path_stats(Client, primary).unwrap().frame_tx.stream > primary_before,
+        "urgent control should use the normal route"
+    );
+    assert!(
+        pair.path_stats(Client, bulk_path).unwrap().frame_tx.stream > bulk_before,
+        "bulk STREAM frames should use the pinned route"
+    );
+    pair.server.inbound.clear();
+
+    // Virtual QUIC timers now trigger retransmissions; no application rewrite.
+    pair.drive();
+    assert!(!pair.is_closed(Client), "loss must not close the client");
+    assert!(!pair.is_closed(Server), "loss must not close the server");
+
+    assert_eq!(pair.streams(Server).accept(Dir::Uni), Some(control));
+    let mut recv = pair.recv_stream(Server, control);
+    let mut chunks = recv.read(true)?;
+    assert_matches!(
+        chunks.next(usize::MAX),
+        Ok(Some(chunk)) if chunk.bytes == b"urgent catalog query"[..]
+    );
+    assert_matches!(chunks.next(usize::MAX), Ok(None));
+    let _ = chunks.finalize();
+
+    assert_eq!(pair.streams(Server).accept(Dir::Uni), Some(bulk));
+    let mut recv = pair.recv_stream(Server, bulk);
+    let mut chunks = recv.read(true)?;
+    let mut actual = Vec::new();
+    while let Some(chunk) = chunks.next(usize::MAX)? {
+        actual.extend_from_slice(&chunk.bytes);
+    }
+    let _ = chunks.finalize();
+    assert_eq!(actual.len(), BYTES, "bulk data must be complete after retransmission");
+    assert_eq!(actual, payload, "recovered payload must preserve byte order and content");
+    Ok(())
+}
+
 /// A stream pinned to a path that is abandoned must never silently fall back to
 /// another path. The application can explicitly retarget the buffered STREAM and FIN.
 #[test]

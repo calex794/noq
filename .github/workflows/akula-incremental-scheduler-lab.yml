@@ -23,5 +23,7 @@ jobs:
         run: cargo test --locked -p noq-proto --lib same_stream_priority -- --nocapture
       - name: Path affinity scenarios
         run: cargo test --locked -p noq-proto --lib stream_affinity_ -- --nocapture
+      - name: Large payload with forced packet loss
+        run: cargo test --locked -p noq-proto --lib akula_bulk_payload_loss_recovery -- --nocapture
       - name: Multipath regressions
         run: cargo test --locked -p noq-proto --lib tests::multipath -- --nocapture
