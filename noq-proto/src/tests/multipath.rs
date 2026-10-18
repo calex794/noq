@@ -1865,6 +1865,106 @@ fn akula_periodic_loss_512k_with_control() -> TestResult {
     Ok(())
 }
 
+/// Six simultaneous 256 KiB files occupy both QUIC paths during repeated
+/// packet loss. An urgent request joins last and must be observed within
+/// bounded virtual scheduling turns. All file bytes must remain intact.
+#[test]
+fn akula_six_large_streams_loss_and_urgent_latency() -> TestResult {
+    let _guard = subscribe();
+    let mut pair = ConnPair::builder().enable_multipath().connect();
+    let primary = PathId::ZERO;
+    let secondary = pair.open_path(
+        Client,
+        FourTuple::from_remote(pair.routes.public_server_addr()),
+        PathStatus::Backup,
+    )?;
+    pair.drive();
+    assert_matches!(
+        pair.poll(Client),
+        Some(Event::Path(PathEvent::Established { id })) if id == secondary
+    );
+
+    pair.set_client_packet_loss_every(Some(8));
+    let control = pair.streams(Client).open(Dir::Uni).unwrap();
+    let primary_before = pair.path_stats(Client, primary).unwrap().frame_tx.stream;
+    let secondary_before = pair.path_stats(Client, secondary).unwrap().frame_tx.stream;
+
+    const PART_SIZE: usize = 256 * 1024;
+    let mut books = Vec::new();
+    for i in 0..6u8 {
+        let id = pair.streams(Client).open(Dir::Uni).unwrap();
+        let path = if i % 2 == 0 { primary } else { secondary };
+        let sender = pair.send_stream(Client, id);
+        sender.set_priority(0)?;
+        sender.set_incremental(true)?;
+        sender.set_affinity(StreamAffinity::Sticky(path))?;
+        let data: Vec<u8> = (0..PART_SIZE)
+            .map(|j| ((j * 17 + usize::from(i) * 31) % 251) as u8)
+            .collect();
+        assert_eq!(pair.send_stream(Client, id).write(&data)?, PART_SIZE);
+        pair.send_stream(Client, id).finish()?;
+        books.push((id, data));
+    }
+
+    // The control message is queued after all six bulk streams, but has a
+    // higher priority and non-incremental transmission semantics.
+    pair.send_stream(Client, control).set_priority(30)?;
+    pair.send_stream(Client, control).set_incremental(false)?;
+    pair.send_stream(Client, control).write(b"urgent metadata")?;
+    pair.send_stream(Client, control).finish()?;
+    let urgent_queued_at = pair.time;
+
+    let mut urgent_turns = None;
+    for turn in 1..=64 {
+        let active = pair.step();
+        let mut receiver = pair.recv_stream(Server, control);
+        if let Ok(mut chunks) = receiver.read(true) {
+            match chunks.next(usize::MAX) {
+                Ok(Some(chunk)) => {
+                    assert_eq!(chunk.bytes.as_ref(), b"urgent metadata");
+                    urgent_turns = Some(turn);
+                }
+                Err(crate::ReadError::Blocked) | Ok(None) => {}
+                Err(error) => panic!("urgent message read failed: {error:?}"),
+            }
+            let _ = chunks.finalize();
+        }
+        if urgent_turns.is_some() {
+            break;
+        }
+        assert!(active, "simulated network stopped before delivering urgent metadata");
+    }
+    let turns = urgent_turns.expect("bulk streams starved the urgent request");
+    let urgent_virtual_delay = pair.time.duration_since(urgent_queued_at);
+    info!(turns, ?urgent_virtual_delay, "urgent request delivered under six-way load");
+
+    pair.drive();
+    assert!(pair.dropped_client_datagrams >= 20, "loss injection did not exercise multi-stream recovery");
+    assert!(
+        pair.path_stats(Client, primary).unwrap().frame_tx.stream > primary_before,
+        "first group of files must use the primary route"
+    );
+    assert!(
+        pair.path_stats(Client, secondary).unwrap().frame_tx.stream > secondary_before,
+        "second group of files must use the backup route"
+    );
+    assert!(!pair.is_closed(Client));
+    assert!(!pair.is_closed(Server));
+
+    for (id, original) in books {
+        let mut recv = pair.recv_stream(Server, id);
+        let mut chunks = recv.read(true)?;
+        let mut actual = Vec::new();
+        while let Some(chunk) = chunks.next(usize::MAX)? {
+            actual.extend_from_slice(&chunk.bytes);
+        }
+        let _ = chunks.finalize();
+        assert_eq!(actual.len(), PART_SIZE, "each file must arrive in full");
+        assert_eq!(actual, original, "file contents and ordering must survive packet loss");
+    }
+    Ok(())
+}
+
 /// A large file starts on a pinned route, delivers only its first QUIC flight,
 /// loses that route, then resumes on the original route after explicit retargeting.
 /// The application must not rewrite the stream or accept duplicate bytes.

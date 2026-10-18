@@ -1485,6 +1485,76 @@ mod tests {
         assert_eq!(queue.len(), 0);
     }
 
+    /// Ten equally prioritized bulk streams must all get one sender turn
+    /// before any stream receives its next turn. A newly queued urgent request
+    /// must preempt the unfinished bulk without starving it afterwards.
+    #[test]
+    fn akula_ten_bulk_round_robin_urgent_preemption() {
+        let mut server = make(Side::Server);
+        server.set_params(&TransportParameters {
+            initial_max_streams_bidi: 11u32.into(),
+            initial_max_data: 10_000u32.into(),
+            initial_max_stream_data_bidi_remote: 512u32.into(),
+            ..TransportParameters::default()
+        });
+        let (mut pending, conn_state) = (Retransmits::default(), ConnState::established());
+        let mut streams = Streams {
+            state: &mut server,
+            conn_state: &conn_state,
+        };
+        let bulk: Vec<_> = (0..10).map(|_| streams.open(Dir::Bi).unwrap()).collect();
+        let urgent = streams.open(Dir::Bi).unwrap();
+        for (i, &id) in bulk.iter().enumerate() {
+            let mut stream = SendStream {
+                id,
+                state: &mut server,
+                pending: &mut pending,
+                conn_state: &conn_state,
+            };
+            assert_eq!(stream.write(&[i as u8; 256]).unwrap(), 256);
+        }
+
+        let mut first_round = Vec::new();
+        for _ in 0..10 {
+            let frames = server.write_frames_for_test(40);
+            assert_eq!(frames.len(), 1);
+            first_round.push(frames[0].id);
+        }
+        assert_eq!(first_round, bulk, "ten peers must receive equal first turns");
+
+        {
+            let mut high = SendStream {
+                id: urgent,
+                state: &mut server,
+                pending: &mut pending,
+                conn_state: &conn_state,
+            };
+            high.set_priority(20).unwrap();
+            high.set_incremental(false).unwrap();
+            assert_eq!(high.write(b"urgent").unwrap(), 6);
+        }
+
+        let first_after = server.write_frames_for_test(40);
+        assert!(!first_after.is_empty());
+        assert_eq!(
+            first_after[0].id,
+            urgent,
+            "a new urgent request must be sent in the next scheduling opportunity"
+        );
+
+        let mut second_round: Vec<_> = first_after.iter().skip(1).map(|frame| frame.id).collect();
+        while second_round.len() < bulk.len() {
+            let frames = server.write_frames_for_test(40);
+            assert!(!frames.is_empty(), "bulk senders must not starve after urgent work");
+            second_round.extend(frames.iter().map(|frame| frame.id));
+            assert!(
+                second_round.len() <= bulk.len(),
+                "no bulk stream may take two turns before its peers"
+            );
+        }
+        assert_eq!(second_round, bulk, "round-robin must resume after preemption");
+    }
+
     #[test]
     fn unblocking_requeues_after_eligible_streams() {
         let mut server = make(Side::Server);

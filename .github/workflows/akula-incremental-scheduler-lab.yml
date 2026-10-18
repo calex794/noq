@@ -27,5 +27,9 @@ jobs:
         run: cargo test --locked -p noq-proto --lib akula_bulk_payload_loss_recovery -- --nocapture
       - name: Large file interrupted by route removal
         run: cargo test --locked -p noq-proto --lib akula_midstream_route_loss_512k_requires_explicit_retarget -- --nocapture
+      - name: Ten bulk stream fairness and urgent preemption
+        run: cargo test --locked -p noq-proto --lib akula_ten_bulk_round_robin_urgent_preemption -- --nocapture
+      - name: Six files on two paths with recurring loss and urgent request
+        run: cargo test --locked -p noq-proto --lib akula_six_large_streams_loss_and_urgent_latency -- --nocapture
       - name: Multipath regressions
         run: cargo test --locked -p noq-proto --lib tests::multipath -- --nocapture
