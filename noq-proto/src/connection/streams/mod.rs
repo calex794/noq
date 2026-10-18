@@ -1,5 +1,5 @@
 use alloc::collections::BinaryHeap;
-use core::ops::{Deref, DerefMut};
+use core::{cmp::Ordering, ops::{Deref, DerefMut}};
 use std::{collections::hash_map, io};
 
 use bytes::Bytes;
@@ -313,7 +313,7 @@ impl<'a> SendStream<'a> {
         if !was_pending {
             self.state
                 .pending
-                .push_pending(self.id, stream.priority, stream.affinity);
+                .push_pending(self.id, stream.priority, stream.affinity, stream.incremental);
         }
         Ok(written)
     }
@@ -346,7 +346,7 @@ impl<'a> SendStream<'a> {
         if !was_pending {
             self.state
                 .pending
-                .push_pending(self.id, stream.priority, stream.affinity);
+                .push_pending(self.id, stream.priority, stream.affinity, stream.incremental);
         }
 
         Ok(())
@@ -399,6 +399,35 @@ impl<'a> SendStream<'a> {
         Ok(())
     }
 
+    /// Controls whether this stream is interleaved with other streams of equal priority.
+    ///
+    /// Non-incremental streams take precedence over incremental streams within one
+    /// priority level. This only affects STREAM frames, not control frames, and
+    /// does not change the stream's selected network path.
+    ///
+    /// Changes to an already queued stream may take effect after its next send.
+    pub fn set_incremental(&mut self, incremental: bool) -> Result<(), ClosedStream> {
+        let max_send_data = self.state.max_send_data(self.id);
+        let stream = self
+            .state
+            .send
+            .get_mut(&self.id)
+            .map(get_or_insert_send(max_send_data))
+            .ok_or(ClosedStream { _private: () })?;
+        stream.incremental = incremental;
+        Ok(())
+    }
+
+    /// Whether the stream is interleaved with peers of equal priority.
+    pub fn incremental(&self) -> Result<bool, ClosedStream> {
+        let stream = self
+            .state
+            .send
+            .get(&self.id)
+            .ok_or(ClosedStream { _private: () })?;
+        Ok(stream.as_ref().map(|s| s.incremental).unwrap_or(true))
+    }
+
     /// Sets the path affinity of a stream.
     ///
     /// Applies to pending and future STREAM data, including retransmissions and FINs.
@@ -428,7 +457,7 @@ impl<'a> SendStream<'a> {
             if !stream.is_reset() && stream.is_pending() {
                 self.state
                     .pending
-                    .push_pending(self.id, stream.priority, new_affinity);
+                    .push_pending(self.id, stream.priority, new_affinity, stream.incremental);
             }
         } else {
             match new_affinity {
@@ -495,7 +524,13 @@ impl PendingStreamsQueue {
     /// Enqueues a stream in its affinity bucket after queued streams of the same priority.
     ///
     /// Ignores blocked streams and preserves any existing queued entry and its turn.
-    fn push_pending(&mut self, id: StreamId, priority: i32, affinity: StreamAffinity) {
+    fn push_pending(
+        &mut self,
+        id: StreamId,
+        priority: i32,
+        affinity: StreamAffinity,
+        incremental: bool,
+    ) {
         let sticky = match affinity {
             StreamAffinity::Any => None,
             StreamAffinity::Sticky(path) => Some(path),
@@ -514,10 +549,13 @@ impl PendingStreamsQueue {
         // This is enough to implement round-robin scheduling for streams that are still pending
         // even after being handled, as in that case they are removed from the `BinaryHeap`,
         // handled, and then immediately reinserted.
-        self.recency -= 1;
+        if incremental {
+            self.recency -= 1;
+        }
         let pending = PendingStream {
             priority,
-            recency: self.recency,
+            incremental,
+            recency: if incremental { self.recency } else { u64::MAX },
             id,
         };
         self.queue_mut(sticky).push(pending);
@@ -649,12 +687,14 @@ impl Drop for PendingQueueMut<'_> {
 }
 
 /// The [`StreamId`] of a stream with pending data queued, ordered by its priority and recency
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, PartialEq, Eq)]
 struct PendingStream {
     /// The priority of the stream
     // Note that this field should be kept above the `recency` field, in order for the `Ord` derive
     // to be correct (See https://doc.rust-lang.org/stable/std/cmp/trait.Ord.html#derivable)
     priority: i32,
+    /// Whether other streams of the same priority may be interleaved with this one.
+    incremental: bool,
     /// A tie-breaker for streams of the same priority, used to improve fairness by implementing
     /// round-robin scheduling: Larger values are prioritized, so it is initialised to
     /// `u64::MAX`, and when a stream writes data, we know that it currently has the highest
@@ -667,6 +707,22 @@ struct PendingStream {
     // field should be kept below the `priority` and `recency` fields, so that it does not
     // interfere with the behaviour of the `Ord` derive
     id: StreamId,
+}
+
+impl Ord for PendingStream {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.priority
+            .cmp(&other.priority)
+            .then_with(|| other.incremental.cmp(&self.incremental))
+            .then_with(|| self.recency.cmp(&other.recency))
+            .then_with(|| other.id.cmp(&self.id))
+    }
+}
+
+impl PartialOrd for PendingStream {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
 /// Application events about streams

@@ -563,7 +563,7 @@ impl StreamsState {
                 // will have a chance to write data before we touch this stream
                 // again.
                 self.pending
-                    .push_pending(id, stream.priority, stream.affinity);
+                    .push_pending(id, stream.priority, stream.affinity, stream.incremental);
             }
 
             let range = offsets.clone();
@@ -626,7 +626,7 @@ impl StreamsState {
         };
         if !stream.is_pending() {
             self.pending
-                .push_pending(frame.id, stream.priority, stream.affinity);
+                .push_pending(frame.id, stream.priority, stream.affinity, stream.incremental);
         }
         stream.fin_pending |= frame.fin;
         stream.pending.retransmit(frame.offsets);
@@ -646,7 +646,7 @@ impl StreamsState {
                 }
                 if !stream.is_pending() {
                     self.pending
-                        .push_pending(id, stream.priority, stream.affinity);
+                        .push_pending(id, stream.priority, stream.affinity, stream.incremental);
                 }
                 stream.pending.retransmit_all_for_0rtt();
             }
@@ -1417,10 +1417,10 @@ mod tests {
         let mut queue = PendingStreamsQueue::new();
         let ids = [0, 1, 2, 3].map(|i| StreamId::new(Side::Client, Dir::Uni, i));
         let path = PathId::ZERO;
-        queue.push_pending(ids[0], 0, Any);
-        queue.push_pending(ids[1], 0, Sticky(path));
-        queue.push_pending(ids[2], 0, Sticky(path));
-        queue.push_pending(ids[3], 1, Sticky(path));
+        queue.push_pending(ids[0], 0, Any, true);
+        queue.push_pending(ids[1], 0, Sticky(path), true);
+        queue.push_pending(ids[2], 0, Sticky(path), true);
+        queue.push_pending(ids[3], 1, Sticky(path), true);
         assert_eq!(queue.pop(path, true).unwrap().id, ids[3]);
 
         // One Any stream and two sticky streams get equal turns, not equal bucket shares.
@@ -1431,7 +1431,7 @@ mod tests {
                 (ids[2], Sticky(path)),
             ] {
                 assert_eq!(queue.pop(path, true).unwrap().id, id);
-                queue.push_pending(id, 0, affinity);
+                queue.push_pending(id, 0, affinity, true);
             }
         }
 
@@ -1442,6 +1442,117 @@ mod tests {
         }
         assert_eq!(queue.len(), 0);
         assert!(queue.sticky.is_empty());
+    }
+
+    /// A high-priority control message must preempt ten bulk transfers, while
+    /// non-incremental messages win ties within one priority on either path.
+    #[test]
+    fn akula_ten_bulk_streams_and_control_priority() {
+        use crate::StreamAffinity::{Any, Block, Sticky};
+
+        let primary = PathId::ZERO;
+        let secondary = primary.next();
+        let mut queue = PendingStreamsQueue::new();
+        let books: Vec<_> = (0..10)
+            .map(|i| StreamId::new(Side::Client, Dir::Uni, i))
+            .collect();
+
+        for (i, &id) in books.iter().enumerate() {
+            let affinity = if i % 2 == 0 { Any } else { Sticky(secondary) };
+            queue.push_pending(id, 0, affinity, true);
+        }
+
+        let metadata = StreamId::new(Side::Client, Dir::Uni, 10);
+        queue.push_pending(metadata, 0, Sticky(secondary), false);
+        let control = StreamId::new(Side::Client, Dir::Uni, 11);
+        queue.push_pending(control, 10, Any, true);
+        let blocked = StreamId::new(Side::Client, Dir::Uni, 12);
+        queue.push_pending(blocked, i32::MAX, Block, false);
+        assert_eq!(queue.len(), 12, "blocked streams must not enter send queues");
+
+        assert_eq!(queue.pop(secondary, true).unwrap().id, control);
+        assert_eq!(
+            queue.pop(secondary, true).unwrap().id,
+            metadata,
+            "non-incremental metadata must precede incremental bulk at equal priority"
+        );
+        assert_eq!(queue.pop(primary, true).unwrap().id, books[0]);
+        for &id in &books[1..] {
+            assert_eq!(queue.pop(secondary, true).unwrap().id, id);
+        }
+        assert!(queue.pop(primary, true).is_none());
+        assert!(queue.pop(secondary, true).is_none());
+        assert_eq!(queue.len(), 0);
+    }
+
+    /// Ten equally prioritized bulk streams must all get one sender turn
+    /// before any stream receives its next turn. A newly queued urgent request
+    /// must preempt the unfinished bulk without starving it afterwards.
+    #[test]
+    fn akula_ten_bulk_round_robin_urgent_preemption() {
+        let mut server = make(Side::Server);
+        server.set_params(&TransportParameters {
+            initial_max_streams_bidi: 11u32.into(),
+            initial_max_data: 10_000u32.into(),
+            initial_max_stream_data_bidi_remote: 512u32.into(),
+            ..TransportParameters::default()
+        });
+        let (mut pending, conn_state) = (Retransmits::default(), ConnState::established());
+        let mut streams = Streams {
+            state: &mut server,
+            conn_state: &conn_state,
+        };
+        let bulk: Vec<_> = (0..10).map(|_| streams.open(Dir::Bi).unwrap()).collect();
+        let urgent = streams.open(Dir::Bi).unwrap();
+        for (i, &id) in bulk.iter().enumerate() {
+            let mut stream = SendStream {
+                id,
+                state: &mut server,
+                pending: &mut pending,
+                conn_state: &conn_state,
+            };
+            assert_eq!(stream.write(&[i as u8; 256]).unwrap(), 256);
+        }
+
+        let mut first_round = Vec::new();
+        for _ in 0..10 {
+            let frames = server.write_frames_for_test(40);
+            assert_eq!(frames.len(), 1);
+            first_round.push(frames[0].id);
+        }
+        assert_eq!(first_round, bulk, "ten peers must receive equal first turns");
+
+        {
+            let mut high = SendStream {
+                id: urgent,
+                state: &mut server,
+                pending: &mut pending,
+                conn_state: &conn_state,
+            };
+            high.set_priority(20).unwrap();
+            high.set_incremental(false).unwrap();
+            assert_eq!(high.write(b"urgent").unwrap(), 6);
+        }
+
+        let first_after = server.write_frames_for_test(40);
+        assert!(!first_after.is_empty());
+        assert_eq!(
+            first_after[0].id,
+            urgent,
+            "a new urgent request must be sent in the next scheduling opportunity"
+        );
+
+        let mut second_round: Vec<_> = first_after.iter().skip(1).map(|frame| frame.id).collect();
+        while second_round.len() < bulk.len() {
+            let frames = server.write_frames_for_test(40);
+            assert!(!frames.is_empty(), "bulk senders must not starve after urgent work");
+            second_round.extend(frames.iter().map(|frame| frame.id));
+            assert!(
+                second_round.len() <= bulk.len(),
+                "no bulk stream may take two turns before its peers"
+            );
+        }
+        assert_eq!(second_round, bulk, "round-robin must resume after preemption");
     }
 
     #[test]

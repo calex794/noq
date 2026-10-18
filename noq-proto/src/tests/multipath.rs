@@ -1602,6 +1602,457 @@ fn stream_affinity_retransmit_on_new_path() -> TestResult {
     Ok(())
 }
 
+/// Simulates one control message and ten book parts over two QUIC paths. One
+/// book is intentionally blocked, then allowed to finish only after explicit
+/// retargeting following the removal of its preferred route.
+#[test]
+fn akula_ten_books_control_and_manual_route_recovery() -> TestResult {
+    let _guard = subscribe();
+    let mut pair = ConnPair::builder().enable_multipath().connect();
+    let primary = PathId::ZERO;
+    let server_addr = pair.routes.public_server_addr();
+    let secondary = pair.open_path(
+        Client,
+        FourTuple::from_remote(server_addr),
+        PathStatus::Backup,
+    )?;
+    pair.drive();
+    assert_matches!(
+        pair.poll(Client),
+        Some(Event::Path(PathEvent::Established { id })) if id == secondary
+    );
+
+    let primary_before = pair.path_stats(Client, primary).unwrap().frame_tx.stream;
+    let secondary_before = pair.path_stats(Client, secondary).unwrap().frame_tx.stream;
+
+    let control = pair.streams(Client).open(Dir::Uni).unwrap();
+    pair.send_stream(Client, control).set_priority(10)?;
+    pair.send_stream(Client, control).set_incremental(false)?;
+    pair.send_stream(Client, control).write(b"catalog ping")?;
+    pair.send_stream(Client, control).finish()?;
+
+    let mut books = Vec::new();
+    for i in 0..10u8 {
+        let stream = pair.streams(Client).open(Dir::Uni).unwrap();
+        pair.send_stream(Client, stream).set_priority(-1)?;
+        pair.send_stream(Client, stream).set_incremental(true)?;
+        if i == 9 {
+            pair.send_stream(Client, stream)
+                .set_affinity(StreamAffinity::Block)?;
+        } else {
+            pair.send_stream(Client, stream)
+                .set_affinity(StreamAffinity::Sticky(secondary))?;
+        }
+        pair.send_stream(Client, stream).write(&[i; 64])?;
+        pair.send_stream(Client, stream).finish()?;
+        books.push(stream);
+    }
+    pair.drive();
+
+    assert_eq!(
+        pair.path_stats(Client, primary).unwrap().frame_tx.stream,
+        primary_before + 1,
+        "control frame should be the only STREAM on the primary path"
+    );
+    assert_eq!(
+        pair.path_stats(Client, secondary).unwrap().frame_tx.stream,
+        secondary_before + 9,
+        "nine book parts must use their explicitly selected route"
+    );
+
+    assert_eq!(pair.streams(Server).accept(Dir::Uni), Some(control));
+    let mut recv = pair.recv_stream(Server, control);
+    let mut chunks = recv.read(true)?;
+    assert_matches!(chunks.next(usize::MAX), Ok(Some(chunk)) if chunk.bytes == b"catalog ping"[..]);
+    assert_matches!(chunks.next(usize::MAX), Ok(None));
+    let _ = chunks.finalize();
+
+    for (i, &stream) in books[..9].iter().enumerate() {
+        assert_eq!(pair.streams(Server).accept(Dir::Uni), Some(stream));
+        let mut recv = pair.recv_stream(Server, stream);
+        let mut chunks = recv.read(true)?;
+        assert_matches!(chunks.next(usize::MAX), Ok(Some(chunk)) if chunk.bytes.as_ref() == &[i as u8; 64][..]);
+        assert_matches!(chunks.next(usize::MAX), Ok(None));
+        let _ = chunks.finalize();
+    }
+    assert_eq!(pair.streams(Server).accept(Dir::Uni), None);
+
+    pair.close_path(Client, secondary, 0u8.into())?;
+    pair.drive();
+    assert_eq!(
+        pair.path_stats(Client, primary).unwrap().frame_tx.stream,
+        primary_before + 1,
+        "the blocked book must not silently migrate during route removal"
+    );
+
+    let last = books[9];
+    pair.send_stream(Client, last)
+        .set_affinity(StreamAffinity::Any)?;
+    pair.drive();
+    assert_eq!(
+        pair.path_stats(Client, primary).unwrap().frame_tx.stream,
+        primary_before + 2
+    );
+    assert_eq!(pair.streams(Server).accept(Dir::Uni), Some(last));
+    let mut recv = pair.recv_stream(Server, last);
+    let mut chunks = recv.read(true)?;
+    assert_matches!(chunks.next(usize::MAX), Ok(Some(chunk)) if chunk.bytes.as_ref() == &[9u8; 64][..]);
+    assert_matches!(chunks.next(usize::MAX), Ok(None));
+    let _ = chunks.finalize();
+    Ok(())
+}
+
+/// Exercise multi-packet retransmission after losing an entire outbound burst.
+///
+/// The 512 KiB body fits inside the default stream receive window, so this
+/// specifically measures loss recovery, not a sender waiting for application reads.
+#[test]
+fn akula_bulk_payload_loss_recovery() -> TestResult {
+    let _guard = subscribe();
+    let mut pair = ConnPair::builder().enable_multipath().connect();
+    let primary = PathId::ZERO;
+    let remote = pair.routes.public_server_addr();
+    let bulk_path = pair.open_path(
+        Client,
+        FourTuple::from_remote(remote),
+        PathStatus::Backup,
+    )?;
+    pair.drive();
+    assert_matches!(
+        pair.poll(Client),
+        Some(Event::Path(PathEvent::Established { id })) if id == bulk_path
+    );
+
+    let control = pair.streams(Client).open(Dir::Uni).unwrap();
+    pair.send_stream(Client, control).set_priority(10)?;
+    pair.send_stream(Client, control).set_incremental(false)?;
+    pair.send_stream(Client, control).write(b"urgent catalog query")?;
+    pair.send_stream(Client, control).finish()?;
+
+    let bulk = pair.streams(Client).open(Dir::Uni).unwrap();
+    pair.send_stream(Client, bulk).set_priority(-1)?;
+    pair.send_stream(Client, bulk).set_incremental(true)?;
+    pair.send_stream(Client, bulk)
+        .set_affinity(StreamAffinity::Sticky(bulk_path))?;
+
+    const BYTES: usize = 512 * 1024;
+    let payload: Vec<u8> = (0..BYTES)
+        .map(|i| ((i * 17 + 3) % 251) as u8)
+        .collect();
+    assert_eq!(pair.send_stream(Client, bulk).write(&payload)?, BYTES);
+    pair.send_stream(Client, bulk).finish()?;
+
+    let primary_before = pair.path_stats(Client, primary).unwrap().frame_tx.stream;
+    let bulk_before = pair.path_stats(Client, bulk_path).unwrap().frame_tx.stream;
+    // Both streams start sending, but the server loses the first complete burst.
+    pair.drive_client();
+    assert!(
+        pair.path_stats(Client, primary).unwrap().frame_tx.stream > primary_before,
+        "urgent control should use the normal route"
+    );
+    assert!(
+        pair.path_stats(Client, bulk_path).unwrap().frame_tx.stream > bulk_before,
+        "bulk STREAM frames should use the pinned route"
+    );
+    pair.server.inbound.clear();
+
+    // Virtual QUIC timers now trigger retransmissions; no application rewrite.
+    pair.drive();
+    assert!(!pair.is_closed(Client), "loss must not close the client");
+    assert!(!pair.is_closed(Server), "loss must not close the server");
+
+    assert_eq!(pair.streams(Server).accept(Dir::Uni), Some(control));
+    let mut recv = pair.recv_stream(Server, control);
+    let mut chunks = recv.read(true)?;
+    assert_matches!(
+        chunks.next(usize::MAX),
+        Ok(Some(chunk)) if chunk.bytes == b"urgent catalog query"[..]
+    );
+    assert_matches!(chunks.next(usize::MAX), Ok(None));
+    let _ = chunks.finalize();
+
+    assert_eq!(pair.streams(Server).accept(Dir::Uni), Some(bulk));
+    let mut recv = pair.recv_stream(Server, bulk);
+    let mut chunks = recv.read(true)?;
+    let mut actual = Vec::new();
+    while let Some(chunk) = chunks.next(usize::MAX)? {
+        actual.extend_from_slice(&chunk.bytes);
+    }
+    let _ = chunks.finalize();
+    assert_eq!(actual.len(), BYTES, "bulk data must be complete after retransmission");
+    assert_eq!(actual, payload, "recovered payload must preserve byte order and content");
+    Ok(())
+}
+
+/// Deterministically lose every fifth outbound datagram while carrying 512 KiB
+/// over a pinned backup path and an urgent query over the default route.
+/// This tests recurring loss, unlike the first-burst-only recovery regression.
+#[test]
+fn akula_periodic_loss_512k_with_control() -> TestResult {
+    let _guard = subscribe();
+    let mut pair = ConnPair::builder().enable_multipath().connect();
+    let primary = PathId::ZERO;
+    let remote = pair.routes.public_server_addr();
+    let bulk_path = pair.open_path(
+        Client,
+        FourTuple::from_remote(remote),
+        PathStatus::Backup,
+    )?;
+    pair.drive();
+    assert_matches!(
+        pair.poll(Client),
+        Some(Event::Path(PathEvent::Established { id })) if id == bulk_path
+    );
+
+    pair.set_client_packet_loss_every(Some(5));
+    let control = pair.streams(Client).open(Dir::Uni).unwrap();
+    pair.send_stream(Client, control).set_priority(10)?;
+    pair.send_stream(Client, control).set_incremental(false)?;
+    pair.send_stream(Client, control).write(b"urgent status")?;
+    pair.send_stream(Client, control).finish()?;
+
+    let bulk = pair.streams(Client).open(Dir::Uni).unwrap();
+    pair.send_stream(Client, bulk).set_priority(-1)?;
+    pair.send_stream(Client, bulk).set_incremental(true)?;
+    pair.send_stream(Client, bulk)
+        .set_affinity(StreamAffinity::Sticky(bulk_path))?;
+    const BYTES: usize = 512 * 1024;
+    let payload: Vec<u8> = (0..BYTES)
+        .map(|i| ((i * 31 + 11) % 251) as u8)
+        .collect();
+    assert_eq!(pair.send_stream(Client, bulk).write(&payload)?, BYTES);
+    pair.send_stream(Client, bulk).finish()?;
+
+    let primary_before = pair.path_stats(Client, primary).unwrap().frame_tx.stream;
+    let bulk_before = pair.path_stats(Client, bulk_path).unwrap().frame_tx.stream;
+    pair.drive();
+
+    assert!(
+        pair.dropped_client_datagrams >= 10,
+        "packet fault injection did not run across the complete transfer"
+    );
+    assert!(
+        pair.path_stats(Client, primary).unwrap().frame_tx.stream > primary_before,
+        "urgent control must travel over the default route"
+    );
+    assert!(
+        pair.path_stats(Client, bulk_path).unwrap().frame_tx.stream > bulk_before,
+        "pinned bulk must travel over the selected route"
+    );
+    assert!(!pair.is_closed(Client));
+    assert!(!pair.is_closed(Server));
+
+    assert_eq!(pair.streams(Server).accept(Dir::Uni), Some(control));
+    let mut receiver = pair.recv_stream(Server, control);
+    let mut chunks = receiver.read(true)?;
+    assert_matches!(
+        chunks.next(usize::MAX),
+        Ok(Some(chunk)) if chunk.bytes == b"urgent status"[..]
+    );
+    assert_matches!(chunks.next(usize::MAX), Ok(None));
+    let _ = chunks.finalize();
+
+    assert_eq!(pair.streams(Server).accept(Dir::Uni), Some(bulk));
+    let mut receiver = pair.recv_stream(Server, bulk);
+    let mut chunks = receiver.read(true)?;
+    let mut result = Vec::new();
+    while let Some(chunk) = chunks.next(usize::MAX)? {
+        result.extend_from_slice(&chunk.bytes);
+    }
+    let _ = chunks.finalize();
+    assert_eq!(result.len(), BYTES);
+    assert_eq!(result, payload, "repeated packet loss must not alter bytes or order");
+    Ok(())
+}
+
+/// Six simultaneous 256 KiB files occupy both QUIC paths during repeated
+/// packet loss. An urgent request joins last and must be observed within
+/// bounded virtual scheduling turns. All file bytes must remain intact.
+#[test]
+fn akula_six_large_streams_loss_and_urgent_latency() -> TestResult {
+    let _guard = subscribe();
+    let mut pair = ConnPair::builder().enable_multipath().connect();
+    let primary = PathId::ZERO;
+    let secondary = pair.open_path(
+        Client,
+        FourTuple::from_remote(pair.routes.public_server_addr()),
+        PathStatus::Backup,
+    )?;
+    pair.drive();
+    assert_matches!(
+        pair.poll(Client),
+        Some(Event::Path(PathEvent::Established { id })) if id == secondary
+    );
+
+    pair.set_client_packet_loss_every(Some(8));
+    let control = pair.streams(Client).open(Dir::Uni).unwrap();
+    let primary_before = pair.path_stats(Client, primary).unwrap().frame_tx.stream;
+    let secondary_before = pair.path_stats(Client, secondary).unwrap().frame_tx.stream;
+
+    const PART_SIZE: usize = 256 * 1024;
+    let mut books = Vec::new();
+    for i in 0..6u8 {
+        let id = pair.streams(Client).open(Dir::Uni).unwrap();
+        let path = if i % 2 == 0 { primary } else { secondary };
+        let mut sender = pair.send_stream(Client, id);
+        sender.set_priority(0)?;
+        sender.set_incremental(true)?;
+        sender.set_affinity(StreamAffinity::Sticky(path))?;
+        let data: Vec<u8> = (0..PART_SIZE)
+            .map(|j| ((j * 17 + usize::from(i) * 31) % 251) as u8)
+            .collect();
+        assert_eq!(pair.send_stream(Client, id).write(&data)?, PART_SIZE);
+        pair.send_stream(Client, id).finish()?;
+        books.push((id, data));
+    }
+
+    // The control message is queued after all six bulk streams, but has a
+    // higher priority and non-incremental transmission semantics.
+    pair.send_stream(Client, control).set_priority(30)?;
+    pair.send_stream(Client, control).set_incremental(false)?;
+    pair.send_stream(Client, control).write(b"urgent metadata")?;
+    pair.send_stream(Client, control).finish()?;
+    let urgent_queued_at = pair.time;
+
+    let mut urgent_turns = None;
+    for turn in 1..=64 {
+        let active = pair.step();
+        let mut receiver = pair.recv_stream(Server, control);
+        if let Ok(mut chunks) = receiver.read(true) {
+            match chunks.next(usize::MAX) {
+                Ok(Some(chunk)) => {
+                    assert_eq!(chunk.bytes.as_ref(), b"urgent metadata");
+                    urgent_turns = Some(turn);
+                }
+                Err(crate::ReadError::Blocked) | Ok(None) => {}
+                Err(error) => panic!("urgent message read failed: {error:?}"),
+            }
+            let _ = chunks.finalize();
+        }
+        if urgent_turns.is_some() {
+            break;
+        }
+        assert!(active, "simulated network stopped before delivering urgent metadata");
+    }
+    let turns = urgent_turns.expect("bulk streams starved the urgent request");
+    let urgent_virtual_delay = pair.time.duration_since(urgent_queued_at);
+    info!(turns, ?urgent_virtual_delay, "urgent request delivered under six-way load");
+
+    pair.drive();
+    assert!(pair.dropped_client_datagrams >= 20, "loss injection did not exercise multi-stream recovery");
+    assert!(
+        pair.path_stats(Client, primary).unwrap().frame_tx.stream > primary_before,
+        "first group of files must use the primary route"
+    );
+    assert!(
+        pair.path_stats(Client, secondary).unwrap().frame_tx.stream > secondary_before,
+        "second group of files must use the backup route"
+    );
+    assert!(!pair.is_closed(Client));
+    assert!(!pair.is_closed(Server));
+
+    for (id, original) in books {
+        let mut recv = pair.recv_stream(Server, id);
+        let mut chunks = recv.read(true)?;
+        let mut actual = Vec::new();
+        while let Some(chunk) = chunks.next(usize::MAX)? {
+            actual.extend_from_slice(&chunk.bytes);
+        }
+        let _ = chunks.finalize();
+        assert_eq!(actual.len(), PART_SIZE, "each file must arrive in full");
+        assert_eq!(actual, original, "file contents and ordering must survive packet loss");
+    }
+    Ok(())
+}
+
+/// A large file starts on a pinned route, delivers only its first QUIC flight,
+/// loses that route, then resumes on the original route after explicit retargeting.
+/// The application must not rewrite the stream or accept duplicate bytes.
+#[test]
+fn akula_midstream_route_loss_512k_requires_explicit_retarget() -> TestResult {
+    let _guard = subscribe();
+    let mut pair = ConnPair::builder().enable_multipath().connect();
+    let primary = PathId::ZERO;
+    let server_addr = pair.routes.public_server_addr();
+    let failing = pair.open_path(
+        Client,
+        FourTuple::from_remote(server_addr),
+        PathStatus::Backup,
+    )?;
+    pair.drive();
+    assert_matches!(
+        pair.poll(Client),
+        Some(Event::Path(PathEvent::Established { id })) if id == failing
+    );
+
+    let bulk = pair.streams(Client).open(Dir::Uni).unwrap();
+    pair.send_stream(Client, bulk)
+        .set_affinity(StreamAffinity::Sticky(failing))?;
+    pair.send_stream(Client, bulk).set_priority(-1)?;
+    pair.send_stream(Client, bulk).set_incremental(true)?;
+
+    const SIZE: usize = 512 * 1024;
+    let payload: Vec<u8> = (0..SIZE)
+        .map(|i| ((i * 13 + 97) % 251) as u8)
+        .collect();
+    assert_eq!(pair.send_stream(Client, bulk).write(&payload)?, SIZE);
+    pair.send_stream(Client, bulk).finish()?;
+
+    // The congestion window only allows a small portion of the file to leave
+    // on the first turn. Deliver it to the receiver before abandoning the route.
+    pair.drive_client();
+    pair.drive_server();
+    assert_eq!(pair.streams(Server).accept(Dir::Uni), Some(bulk));
+    let mut received = Vec::new();
+    {
+        let mut recv = pair.recv_stream(Server, bulk);
+        let mut chunks = recv.read(true)?;
+        loop {
+            match chunks.next(usize::MAX) {
+                Ok(Some(chunk)) => received.extend_from_slice(&chunk.bytes),
+                Err(crate::ReadError::Blocked) => break,
+                Ok(None) => panic!("the stream finished before the route failed"),
+                Err(error) => panic!("unexpected stream read error: {error:?}"),
+            }
+        }
+        let _ = chunks.finalize();
+    }
+    assert!(
+        !received.is_empty() && received.len() < SIZE,
+        "route failure must happen after some data arrived but before the file finished"
+    );
+    assert_eq!(received.as_slice(), &payload[..received.len()]);
+
+    let primary_before = pair.path_stats(Client, primary).unwrap().frame_tx.stream;
+    pair.close_path(Client, failing, 0u8.into())?;
+    pair.drive();
+    assert_eq!(
+        pair.path_stats(Client, primary).unwrap().frame_tx.stream,
+        primary_before,
+        "remaining file data must not silently cross an unauthorized route"
+    );
+    assert!(!pair.is_closed(Client));
+    assert!(!pair.is_closed(Server));
+
+    pair.send_stream(Client, bulk)
+        .set_affinity(StreamAffinity::Any)?;
+    pair.drive();
+    assert!(
+        pair.path_stats(Client, primary).unwrap().frame_tx.stream > primary_before,
+        "explicit retargeting must use the primary route"
+    );
+
+    let mut recv = pair.recv_stream(Server, bulk);
+    let mut chunks = recv.read(true)?;
+    while let Some(chunk) = chunks.next(usize::MAX)? {
+        received.extend_from_slice(&chunk.bytes);
+    }
+    let _ = chunks.finalize();
+    assert_eq!(received.len(), SIZE, "all bytes must arrive after route recovery");
+    assert_eq!(received, payload, "route recovery must not duplicate or corrupt content");
+    Ok(())
+}
+
 /// A stream pinned to a path that is abandoned must never silently fall back to
 /// another path. The application can explicitly retarget the buffered STREAM and FIN.
 #[test]

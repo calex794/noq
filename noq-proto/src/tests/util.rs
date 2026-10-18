@@ -65,6 +65,11 @@ pub(super) struct Pair {
     /// and determining whether they should get lost.
     pub(super) routes: Routing,
     last_spin: bool,
+    /// Test-only deterministic loss: one in every N client datagrams is dropped.
+    drop_every_nth_client_datagram: Option<usize>,
+    sent_client_datagrams: usize,
+    /// Count of packets intentionally dropped by the deterministic fault injector.
+    pub(super) dropped_client_datagrams: usize,
 }
 
 impl Pair {
@@ -115,6 +120,9 @@ impl Pair {
             mtu: DEFAULT_MTU,
             spins: 0,
             last_spin: false,
+            drop_every_nth_client_datagram: None,
+            sent_client_datagrams: 0,
+            dropped_client_datagrams: 0,
             congestion_experienced: false,
             routes: BasicRouting {
                 client_addr,
@@ -150,6 +158,9 @@ impl Pair {
             mtu: DEFAULT_MTU,
             spins: 0,
             last_spin: false,
+            drop_every_nth_client_datagram: None,
+            sent_client_datagrams: 0,
+            dropped_client_datagrams: 0,
             congestion_experienced: false,
             routes: BasicRouting {
                 client_addr: Self::CLIENT_ADDR,
@@ -207,6 +218,15 @@ impl Pair {
         true
     }
 
+    /// Start injecting repeatable client-to-server packet loss after connection setup.
+    /// Pass None to disable injection. Counters restart whenever settings change.
+    pub(super) fn set_client_packet_loss_every(&mut self, every: Option<usize>) {
+        assert!(every.is_none_or(|n| n >= 2), "loss period must be >= 2");
+        self.drop_every_nth_client_datagram = every;
+        self.sent_client_datagrams = 0;
+        self.dropped_client_datagrams = 0;
+    }
+
     pub(super) fn drive_client(&mut self) {
         let span = info_span!("client");
         let _guard = span.enter();
@@ -216,6 +236,17 @@ impl Pair {
             if packet_size > self.mtu {
                 info!(packet_size, "dropping packet (max size exceeded)");
                 continue;
+            }
+            if let Some(every) = self.drop_every_nth_client_datagram {
+                self.sent_client_datagrams += 1;
+                if self.sent_client_datagrams % every == 0 {
+                    self.dropped_client_datagrams += 1;
+                    debug!(
+                        packet_number = self.sent_client_datagrams,
+                        "injected deterministic client packet loss"
+                    );
+                    continue;
+                }
             }
             if buffer[0] & crate::packet::LONG_HEADER_FORM == 0 {
                 let spin = buffer[0] & crate::packet::SPIN_BIT != 0;

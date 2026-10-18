@@ -1,0 +1,35 @@
+name: Akula incremental scheduler experiment
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - experiment/noq-incremental-scheduling-20261018
+permissions:
+  contents: read
+jobs:
+  scheduler:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with:
+          toolchain: stable
+      - name: Protocol compilation
+        run: cargo check --locked -p noq-proto
+      - name: Stream fairness
+        run: cargo test --locked -p noq-proto --lib same_stream_priority -- --nocapture
+      - name: Path affinity scenarios
+        run: cargo test --locked -p noq-proto --lib stream_affinity_ -- --nocapture
+      - name: Large payload with forced packet loss
+        run: cargo test --locked -p noq-proto --lib akula_bulk_payload_loss_recovery -- --nocapture
+      - name: Large file interrupted by route removal
+        run: cargo test --locked -p noq-proto --lib akula_midstream_route_loss_512k_requires_explicit_retarget -- --nocapture
+      - name: Ten bulk stream fairness and urgent preemption
+        run: cargo test --locked -p noq-proto --lib akula_ten_bulk_round_robin_urgent_preemption -- --nocapture
+      - name: Six files on two paths with recurring loss and urgent request
+        run: cargo test --locked -p noq-proto --lib akula_six_large_streams_loss_and_urgent_latency -- --nocapture
+      - name: Multipath regressions
+        run: cargo test --locked -p noq-proto --lib tests::multipath -- --nocapture
