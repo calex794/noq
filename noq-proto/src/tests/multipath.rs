@@ -1671,7 +1671,7 @@ fn akula_ten_books_control_and_manual_route_recovery() -> TestResult {
         assert_eq!(pair.streams(Server).accept(Dir::Uni), Some(stream));
         let mut recv = pair.recv_stream(Server, stream);
         let mut chunks = recv.read(true)?;
-        assert_matches!(chunks.next(usize::MAX), Ok(Some(chunk)) if chunk.bytes == [i as u8; 64]);
+        assert_matches!(chunks.next(usize::MAX), Ok(Some(chunk)) if chunk.bytes.as_ref() == &[i as u8; 64][..]);
         assert_matches!(chunks.next(usize::MAX), Ok(None));
         let _ = chunks.finalize();
     }
@@ -1696,7 +1696,7 @@ fn akula_ten_books_control_and_manual_route_recovery() -> TestResult {
     assert_eq!(pair.streams(Server).accept(Dir::Uni), Some(last));
     let mut recv = pair.recv_stream(Server, last);
     let mut chunks = recv.read(true)?;
-    assert_matches!(chunks.next(usize::MAX), Ok(Some(chunk)) if chunk.bytes == [9u8; 64]);
+    assert_matches!(chunks.next(usize::MAX), Ok(Some(chunk)) if chunk.bytes.as_ref() == &[9u8; 64][..]);
     assert_matches!(chunks.next(usize::MAX), Ok(None));
     let _ = chunks.finalize();
     Ok(())
