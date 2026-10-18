@@ -1907,8 +1907,13 @@ fn akula_midstream_route_loss_512k_requires_explicit_retarget() -> TestResult {
     {
         let mut recv = pair.recv_stream(Server, bulk);
         let mut chunks = recv.read(true)?;
-        while let Some(chunk) = chunks.next(usize::MAX)? {
-            received.extend_from_slice(&chunk.bytes);
+        loop {
+            match chunks.next(usize::MAX) {
+                Ok(Some(chunk)) => received.extend_from_slice(&chunk.bytes),
+                Err(crate::ReadError::Blocked) => break,
+                Ok(None) => panic!("the stream finished before the route failed"),
+                Err(error) => panic!("unexpected stream read error: {error:?}"),
+            }
         }
         let _ = chunks.finalize();
     }
