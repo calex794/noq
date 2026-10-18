@@ -1630,18 +1630,11 @@ fn stream_affinity_abandoned_path_requires_retarget() -> TestResult {
 
     // Close the pinned path before either buffered STREAM or FIN is transmitted.
     // Control frames for the abandonment may still use the remaining path.
-    let before = pair
-        .path_stats(Client, available)
-        .unwrap()
-        .frame_tx
-        .stream;
+    let before = pair.path_stats(Client, available).unwrap().frame_tx.stream;
     pair.close_path(Client, abandoned, 0u8.into())?;
     pair.drive();
     assert_eq!(
-        pair.path_stats(Client, available)
-            .unwrap()
-            .frame_tx
-            .stream,
+        pair.path_stats(Client, available).unwrap().frame_tx.stream,
         before,
         "a pinned stream must not silently migrate to another path"
     );
@@ -1652,10 +1645,7 @@ fn stream_affinity_abandoned_path_requires_retarget() -> TestResult {
         .set_affinity(StreamAffinity::Any)?;
     pair.drive();
     assert_eq!(
-        pair.path_stats(Client, available)
-            .unwrap()
-            .frame_tx
-            .stream,
+        pair.path_stats(Client, available).unwrap().frame_tx.stream,
         before + 1,
         "explicit retargeting should permit delivery"
     );
