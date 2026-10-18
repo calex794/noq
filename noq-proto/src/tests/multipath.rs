@@ -1894,7 +1894,7 @@ fn akula_six_large_streams_loss_and_urgent_latency() -> TestResult {
     for i in 0..6u8 {
         let id = pair.streams(Client).open(Dir::Uni).unwrap();
         let path = if i % 2 == 0 { primary } else { secondary };
-        let sender = pair.send_stream(Client, id);
+        let mut sender = pair.send_stream(Client, id);
         sender.set_priority(0)?;
         sender.set_incremental(true)?;
         sender.set_affinity(StreamAffinity::Sticky(path))?;
