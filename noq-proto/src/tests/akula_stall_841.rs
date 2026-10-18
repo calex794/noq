@@ -2,7 +2,7 @@
 //! Derived from the original issue's published reproducer (with attribution).
 //! The machine sleep is simulated by advancing the virtual clock. No real sleep needed.
 
-use std::{sync::mpsc, time::Duration};
+use std::{sync::mpsc, time::Duration, vec::Vec};
 
 use super::util::ConnPair;
 use crate::{Dir, Side::*};
