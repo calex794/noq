@@ -1602,6 +1602,72 @@ fn stream_affinity_retransmit_on_new_path() -> TestResult {
     Ok(())
 }
 
+/// A stream pinned to a path that is abandoned must never silently fall back to
+/// another path. The application can explicitly retarget the buffered STREAM and FIN.
+#[test]
+fn stream_affinity_abandoned_path_requires_retarget() -> TestResult {
+    let _guard = subscribe();
+    let mut pair = ConnPair::builder().enable_multipath().connect();
+    let available = PathId::ZERO;
+    let server_addr = pair.routes.public_server_addr();
+    let abandoned = pair.open_path(
+        Client,
+        FourTuple::from_remote(server_addr),
+        PathStatus::Available,
+    )?;
+    pair.drive();
+    assert_matches!(
+        pair.poll(Client),
+        Some(Event::Path(PathEvent::Established { id })) if id == abandoned
+    );
+
+    let stream = pair.streams(Client).open(Dir::Uni).unwrap();
+    pair.send_stream(Client, stream)
+        .set_affinity(StreamAffinity::Sticky(abandoned))?;
+    const MESSAGE: &[u8] = b"manual path failover";
+    pair.send_stream(Client, stream).write(MESSAGE)?;
+    pair.send_stream(Client, stream).finish()?;
+
+    // Close the pinned path before either buffered STREAM or FIN is transmitted.
+    // Control frames for the abandonment may still use the remaining path.
+    let before = pair
+        .path_stats(Client, available)
+        .unwrap()
+        .frame_tx
+        .stream;
+    pair.close_path(Client, abandoned, 0u8.into())?;
+    pair.drive();
+    assert_eq!(
+        pair.path_stats(Client, available)
+            .unwrap()
+            .frame_tx
+            .stream,
+        before,
+        "a pinned stream must not silently migrate to another path"
+    );
+    assert_eq!(pair.streams(Server).accept(Dir::Uni), None);
+
+    // Retargeting the queued bytes and FIN must complete without rewriting the stream.
+    pair.send_stream(Client, stream)
+        .set_affinity(StreamAffinity::Any)?;
+    pair.drive();
+    assert_eq!(
+        pair.path_stats(Client, available)
+            .unwrap()
+            .frame_tx
+            .stream,
+        before + 1,
+        "explicit retargeting should permit delivery"
+    );
+    assert_eq!(pair.streams(Server).accept(Dir::Uni), Some(stream));
+    let mut recv = pair.recv_stream(Server, stream);
+    let mut chunks = recv.read(true)?;
+    assert_matches!(chunks.next(usize::MAX), Ok(Some(chunk)) if chunk.bytes == MESSAGE);
+    assert_matches!(chunks.next(usize::MAX), Ok(None));
+    let _ = chunks.finalize();
+    Ok(())
+}
+
 #[test]
 fn server_abandon_last_verified_path() -> TestResult {
     // The client abandons the last verified path the server has. The server is expected to
