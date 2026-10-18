@@ -1444,6 +1444,47 @@ mod tests {
         assert!(queue.sticky.is_empty());
     }
 
+    /// A high-priority control message must preempt ten bulk transfers, while
+    /// non-incremental messages win ties within one priority on either path.
+    #[test]
+    fn akula_ten_bulk_streams_and_control_priority() {
+        use crate::StreamAffinity::{Any, Block, Sticky};
+
+        let primary = PathId::ZERO;
+        let secondary = primary.next();
+        let mut queue = PendingStreamsQueue::new();
+        let books: Vec<_> = (0..10)
+            .map(|i| StreamId::new(Side::Client, Dir::Uni, i))
+            .collect();
+
+        for (i, &id) in books.iter().enumerate() {
+            let affinity = if i % 2 == 0 { Any } else { Sticky(secondary) };
+            queue.push_pending(id, 0, affinity, true);
+        }
+
+        let metadata = StreamId::new(Side::Client, Dir::Uni, 10);
+        queue.push_pending(metadata, 0, Sticky(secondary), false);
+        let control = StreamId::new(Side::Client, Dir::Uni, 11);
+        queue.push_pending(control, 10, Any, true);
+        let blocked = StreamId::new(Side::Client, Dir::Uni, 12);
+        queue.push_pending(blocked, i32::MAX, Block, false);
+        assert_eq!(queue.len(), 12, "blocked streams must not enter send queues");
+
+        assert_eq!(queue.pop(secondary, true).unwrap().id, control);
+        assert_eq!(
+            queue.pop(secondary, true).unwrap().id,
+            metadata,
+            "non-incremental metadata must precede incremental bulk at equal priority"
+        );
+        assert_eq!(queue.pop(primary, true).unwrap().id, books[0]);
+        for &id in &books[1..] {
+            assert_eq!(queue.pop(secondary, true).unwrap().id, id);
+        }
+        assert!(queue.pop(primary, true).is_none());
+        assert!(queue.pop(secondary, true).is_none());
+        assert_eq!(queue.len(), 0);
+    }
+
     #[test]
     fn unblocking_requeues_after_eligible_streams() {
         let mut server = make(Side::Server);

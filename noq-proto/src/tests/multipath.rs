@@ -1602,6 +1602,106 @@ fn stream_affinity_retransmit_on_new_path() -> TestResult {
     Ok(())
 }
 
+/// Simulates one control message and ten book parts over two QUIC paths. One
+/// book is intentionally blocked, then allowed to finish only after explicit
+/// retargeting following the removal of its preferred route.
+#[test]
+fn akula_ten_books_control_and_manual_route_recovery() -> TestResult {
+    let _guard = subscribe();
+    let mut pair = ConnPair::builder().enable_multipath().connect();
+    let primary = PathId::ZERO;
+    let server_addr = pair.routes.public_server_addr();
+    let secondary = pair.open_path(
+        Client,
+        FourTuple::from_remote(server_addr),
+        PathStatus::Backup,
+    )?;
+    pair.drive();
+    assert_matches!(
+        pair.poll(Client),
+        Some(Event::Path(PathEvent::Established { id })) if id == secondary
+    );
+
+    let primary_before = pair.path_stats(Client, primary).unwrap().frame_tx.stream;
+    let secondary_before = pair.path_stats(Client, secondary).unwrap().frame_tx.stream;
+
+    let control = pair.streams(Client).open(Dir::Uni).unwrap();
+    pair.send_stream(Client, control).set_priority(10)?;
+    pair.send_stream(Client, control).set_incremental(false)?;
+    pair.send_stream(Client, control).write(b"catalog ping")?;
+    pair.send_stream(Client, control).finish()?;
+
+    let mut books = Vec::new();
+    for i in 0..10u8 {
+        let stream = pair.streams(Client).open(Dir::Uni).unwrap();
+        pair.send_stream(Client, stream).set_priority(-1)?;
+        pair.send_stream(Client, stream).set_incremental(true)?;
+        if i == 9 {
+            pair.send_stream(Client, stream)
+                .set_affinity(StreamAffinity::Block)?;
+        } else {
+            pair.send_stream(Client, stream)
+                .set_affinity(StreamAffinity::Sticky(secondary))?;
+        }
+        pair.send_stream(Client, stream).write(&[i; 64])?;
+        pair.send_stream(Client, stream).finish()?;
+        books.push(stream);
+    }
+    pair.drive();
+
+    assert_eq!(
+        pair.path_stats(Client, primary).unwrap().frame_tx.stream,
+        primary_before + 1,
+        "control frame should be the only STREAM on the primary path"
+    );
+    assert_eq!(
+        pair.path_stats(Client, secondary).unwrap().frame_tx.stream,
+        secondary_before + 9,
+        "nine book parts must use their explicitly selected route"
+    );
+
+    assert_eq!(pair.streams(Server).accept(Dir::Uni), Some(control));
+    let mut recv = pair.recv_stream(Server, control);
+    let mut chunks = recv.read(true)?;
+    assert_matches!(chunks.next(usize::MAX), Ok(Some(chunk)) if chunk.bytes == b"catalog ping"[..]);
+    assert_matches!(chunks.next(usize::MAX), Ok(None));
+    let _ = chunks.finalize();
+
+    for (i, &stream) in books[..9].iter().enumerate() {
+        assert_eq!(pair.streams(Server).accept(Dir::Uni), Some(stream));
+        let mut recv = pair.recv_stream(Server, stream);
+        let mut chunks = recv.read(true)?;
+        assert_matches!(chunks.next(usize::MAX), Ok(Some(chunk)) if chunk.bytes == [i as u8; 64]);
+        assert_matches!(chunks.next(usize::MAX), Ok(None));
+        let _ = chunks.finalize();
+    }
+    assert_eq!(pair.streams(Server).accept(Dir::Uni), None);
+
+    pair.close_path(Client, secondary, 0u8.into())?;
+    pair.drive();
+    assert_eq!(
+        pair.path_stats(Client, primary).unwrap().frame_tx.stream,
+        primary_before + 1,
+        "the blocked book must not silently migrate during route removal"
+    );
+
+    let last = books[9];
+    pair.send_stream(Client, last)
+        .set_affinity(StreamAffinity::Any)?;
+    pair.drive();
+    assert_eq!(
+        pair.path_stats(Client, primary).unwrap().frame_tx.stream,
+        primary_before + 2
+    );
+    assert_eq!(pair.streams(Server).accept(Dir::Uni), Some(last));
+    let mut recv = pair.recv_stream(Server, last);
+    let mut chunks = recv.read(true)?;
+    assert_matches!(chunks.next(usize::MAX), Ok(Some(chunk)) if chunk.bytes == [9u8; 64]);
+    assert_matches!(chunks.next(usize::MAX), Ok(None));
+    let _ = chunks.finalize();
+    Ok(())
+}
+
 /// A stream pinned to a path that is abandoned must never silently fall back to
 /// another path. The application can explicitly retarget the buffered STREAM and FIN.
 #[test]
