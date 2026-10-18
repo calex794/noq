@@ -349,8 +349,8 @@ struct StreamIdKey(StreamId);
 
 impl IdentityHashable for StreamIdKey {}
 
-impl std::hash::Hash for StreamIdKey {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+impl core::hash::Hash for StreamIdKey {
+    fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
         state.write_u64(self.0.0);
     }
 }

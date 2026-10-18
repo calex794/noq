@@ -1,9 +1,6 @@
 use alloc::collections::BinaryHeap;
-use std::{
-    collections::hash_map,
-    io,
-    ops::{Deref, DerefMut},
-};
+use core::ops::{Deref, DerefMut};
+use std::{collections::hash_map, io};
 
 use bytes::Bytes;
 use identity_hash::IntMap;
@@ -549,7 +546,7 @@ impl PendingStreamsQueue {
         let Some(affinity) = self.affinities.get_mut(&StreamIdKey(id)) else {
             return;
         };
-        let old_affinity = std::mem::replace(affinity, new_affinity);
+        let old_affinity = core::mem::replace(affinity, new_affinity);
         let mut moved = None;
         self.queue_mut(old_affinity).retain(|pending| {
             if pending.id == id {
