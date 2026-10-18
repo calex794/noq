@@ -1078,14 +1078,12 @@ impl Connection {
             _ => false,
         };
 
-        // Schedule an ACK_FREQUENCY frame if a new one needs to be sent.
-        if let Some(config) = &self.config.ack_frequency_config {
-            let rtt = self
-                .paths
-                .values()
-                .map(|p| p.data.rtt.get())
-                .min()
-                .expect("one path exists");
+        // Schedule an ACK_FREQUENCY frame only while a viable path exists.
+        // After the peer abandons the last path, NoAvailablePath may keep the
+        // connection pollable until its grace period expires (no RTT available).
+        if let Some(config) = &self.config.ack_frequency_config
+            && let Some(rtt) = self.paths.values().map(|p| p.data.rtt.get()).min()
+        {
             self.spaces[SpaceId::Data].pending.ack_frequency = self
                 .ack_frequency
                 .should_send_ack_frequency(rtt, config, &self.peer_params)
