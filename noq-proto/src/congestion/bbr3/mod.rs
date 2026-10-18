@@ -6993,4 +6993,84 @@ mod test {
              simulated {BW} (rel err {final_err})"
         );
     }
+
+    // RED control from eleboucher/noq (towonel-bbr3-fixes); attribution retained.
+
+    /// An idle connection that only exchanges keepalives must not let those
+    /// tiny samples age `max_bw` out of the filter. The ack that clears the
+    /// previous app-limited marker has to re-mark the still-idle sender, or the
+    /// next keepalive sample is taken as a real bandwidth measurement.
+    #[test]
+    fn keepalives_while_idle_preserve_max_bw() {
+        const MSS: u64 = 1200;
+        const BW: f64 = 12_500_000.0;
+        const RTT_NS: u64 = 50_000_000;
+        const KEEPALIVE: u16 = 40;
+        const KEEPALIVE_INTERVAL_NS: u64 = 1_000_000_000;
+
+        let mut sim = Sim::new(Bbr3Config::default(), MSS, BW, RTT_NS);
+        let mut rounds_in_probe_bw = 0;
+        sim.run(
+            1_000_000,
+            |_| ControlFlow::Continue(()),
+            |bbr, _, _, _| {
+                if matches!(bbr.state, BbrState::ProbeBw(_)) {
+                    rounds_in_probe_bw += 1;
+                }
+                if rounds_in_probe_bw > 10_000 {
+                    ControlFlow::Break(())
+                } else {
+                    ControlFlow::Continue(())
+                }
+            },
+        );
+        let max_bw_before = sim.bbr.max_bw;
+        assert!(max_bw_before > BW * 0.5, "warm-up max_bw {max_bw_before}");
+
+        // drain everything in flight, then go idle
+        let mut now_ns = sim.now_ns;
+        while let Some(p) = sim.flight.pop_front() {
+            now_ns = now_ns.max(p.ack_ns);
+            sim.inflight -= MSS;
+            let now_at = sim.at(now_ns);
+            sim.bbr.on_ack(
+                now_at,
+                sim.at(p.send_ns),
+                MSS,
+                p.pn,
+                SpaceKind::Data,
+                true,
+                &sim.rtt_est,
+            );
+            sim.bbr
+                .on_end_acks(now_at, sim.inflight, true, Some(p.pn), SpaceKind::Data);
+        }
+
+        let mut pn = sim.pn;
+        for _ in 0..300 {
+            now_ns += KEEPALIVE_INTERVAL_NS;
+            let sent = sim.at(now_ns);
+            sim.bbr.on_packet_sent(sent, KEEPALIVE, pn, SpaceKind::Data);
+            now_ns += RTT_NS;
+            let acked = sim.at(now_ns);
+            sim.bbr.on_ack(
+                acked,
+                sent,
+                KEEPALIVE as u64,
+                pn,
+                SpaceKind::Data,
+                true,
+                &sim.rtt_est,
+            );
+            sim.bbr
+                .on_end_acks(acked, 0, true, Some(pn), SpaceKind::Data);
+            pn += 1;
+        }
+
+        let max_bw_after = sim.bbr.max_bw;
+        assert!(
+            max_bw_after > max_bw_before * 0.5,
+            "max_bw collapsed from {max_bw_before} to {max_bw_after} after idle keepalives"
+        );
+    }
 }
