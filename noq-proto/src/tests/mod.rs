@@ -56,6 +56,8 @@ use util::{
 mod encode_decode;
 mod multipath;
 #[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
+mod akula_stall_841;
+#[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
 mod proptests;
 #[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
 mod random_interaction;
