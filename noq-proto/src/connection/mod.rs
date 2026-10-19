@@ -3822,7 +3822,7 @@ impl Connection {
             .is_probably_same_path(remote);
 
         self.total_authed_packets += 1;
-        self.reset_keep_alive(path_id, now);
+        self.reset_conn_keep_alive(now);
         self.reset_idle_timeout(now, space_id, path_id);
         self.path_data_mut(path_id).permit_idle_reset = true;
 
@@ -3908,8 +3908,8 @@ impl Connection {
         self.rearm_path_max_idle_timer(now, space, path_id);
     }
 
-    /// Resets both the [`ConnTimer::KeepAlive`] and [`PathTimer::PathKeepAlive`] timers
-    fn reset_keep_alive(&mut self, path_id: PathId, now: Instant) {
+    /// Reset the connection-wide keep-alive after authenticated receive or transmit.
+    fn reset_conn_keep_alive(&mut self, now: Instant) {
         if !self.state.is_established() {
             return;
         }
@@ -3920,6 +3920,18 @@ impl Connection {
                 now + interval,
                 self.qlog.with_time(now),
             );
+        }
+    }
+
+    /// Reset both connection and per-path keep-alive after transmission.
+    ///
+    /// Incoming packets must not defer the path's own keep-alive: otherwise,
+    /// incoming PINGs can prevent us from sending on an idle backup path until
+    /// the peer expires it.
+    fn reset_keep_alive(&mut self, path_id: PathId, now: Instant) {
+        self.reset_conn_keep_alive(now);
+        if !self.state.is_established() {
+            return;
         }
 
         if let Some(interval) = self.path_data(path_id).keep_alive {
