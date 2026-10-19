@@ -740,8 +740,7 @@ impl Connection {
                 // The path has already been informed that outstanding acks should be sent
                 // immediately
                 PathTimer::MaxAckDelay => false,
-                // This timer should not be set, for completeness it's not kept as it's set when
-                // the PATH_ABANDON frame is sent.
+                // Locally abandoned paths arm this timer below after clearing old timers.
                 PathTimer::PathDrained => false,
                 // Sent packets still need to be identified as lost to trigger timely
                 // retransmission.
@@ -756,6 +755,23 @@ impl Connection {
                 let qlog = self.qlog.with_time(now);
                 self.timers.stop(Timer::PerPath(path_id, timer), qlog);
             }
+        }
+
+        // A locally abandoned path must eventually be discarded even if its peer
+        // never learned the path ID and cannot answer PATH_ABANDON. Keep the
+        // local drain separate from peer-directed path-id accounting and avoid
+        // arming a timer after the entire connection has closed.
+        if !self.state.is_closed()
+            && let Some(path) = self.paths.get_mut(&path_id)
+            && !mem::replace(&mut path.data.self_drain_armed, true)
+        {
+            let ack_delay = self.ack_frequency.max_ack_delay_for_pto();
+            let pto = path.data.rtt.pto_base() + ack_delay;
+            self.timers.set(
+                Timer::PerPath(path_id, PathTimer::PathDrained),
+                now + 3 * pto,
+                self.qlog.with_time(now),
+            );
         }
 
         // Set the loss detection timer again, as now it should only be set
