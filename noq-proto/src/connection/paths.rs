@@ -275,6 +275,12 @@ pub(super) struct PathData {
     /// This will only ever be set from false to true.
     pub(super) draining: bool,
 
+    /// Whether this endpoint has armed a drain timer for local path abandonment.
+    ///
+    /// Separate from `draining`, which tracks a peer PATH_ABANDON and its
+    /// path-id grant semantics.
+    pub(super) self_drain_armed: bool,
+
     /// Snapshot of the qlog recovery metrics
     #[cfg(feature = "qlog")]
     recovery_metrics: RecoveryMetrics,
@@ -345,6 +351,7 @@ impl PathData {
             keep_alive: config.default_path_keep_alive_interval,
             permit_idle_reset: true,
             draining: false,
+            self_drain_armed: false,
             #[cfg(feature = "qlog")]
             recovery_metrics: RecoveryMetrics::default(),
             generation,
@@ -393,6 +400,7 @@ impl PathData {
             keep_alive: prev.keep_alive,
             permit_idle_reset: true,
             draining: false,
+            self_drain_armed: false,
             #[cfg(feature = "qlog")]
             recovery_metrics: prev.recovery_metrics.clone(),
             generation,

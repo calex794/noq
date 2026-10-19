@@ -2298,3 +2298,106 @@ fn regression_discarded_path_stats_are_up_to_date() -> TestResult {
 
     Ok(())
 }
+
+/// A locally abandoned candidate path is freed even if the peer never saw it.
+#[test]
+fn regression_locally_abandoned_unseen_path_discarded() -> TestResult {
+    let _guard = subscribe();
+    let mut pair = ConnPair::builder().enable_multipath().connect();
+    let mut second_client_addr = pair.routes.as_basic().client_addr;
+    let mut second_server_addr = pair.routes.as_basic().server_addr;
+    second_client_addr.set_port(second_client_addr.port() + 1);
+    second_server_addr.set_port(second_server_addr.port() + 1);
+    pair.routes = ManyToManyRouting::simple_symmetric(
+        [pair.routes.as_basic().client_addr, second_client_addr],
+        [pair.routes.as_basic().server_addr, second_server_addr],
+    )
+    .into();
+
+    let unknown_path = FourTuple {
+        local_ip: Some(second_client_addr.ip()),
+        remote: second_server_addr,
+    };
+    let id = pair.open_path(Client, unknown_path, PathStatus::Available)?;
+    pair.close_path(Client, id, 0u8.into())?;
+    pair.drive();
+
+    assert_matches!(
+        pair.poll(Client),
+        Some(Event::Path(PathEvent::Abandoned { id: abandoned, .. }))
+            if abandoned == id
+    );
+
+    let mut discarded = false;
+    while let Some(event) = pair.poll(Client) {
+        if matches!(event, Event::Path(PathEvent::Discarded { id: seen, .. }) if seen == id) {
+            discarded = true;
+        }
+    }
+    assert!(
+        discarded,
+        "locally abandoned unseen path was never discarded"
+    );
+    assert!(!pair.paths(Client).contains(&id));
+    assert!(pair.path_status(Client, id).is_err());
+    Ok(())
+}
+
+/// Receive-driven keepalive must not suppress transmissions on an idle backup path.
+/// With asymmetric 900/1000 ms intervals, the peer would otherwise time out
+/// a healthy path while both connection endpoints stay online.
+#[test]
+fn backup_path_keepalive_not_suppressed_by_incoming_ping() -> TestResult {
+    let _guard = subscribe();
+    let mut builder = ConnPair::builder().enable_multipath();
+    let client_interval = Duration::from_millis(900);
+    let server_interval = Duration::from_millis(1000);
+    builder
+        .client_transport_cfg
+        .default_path_keep_alive_interval(Some(client_interval));
+    builder
+        .server_transport_cfg
+        .default_path_keep_alive_interval(Some(server_interval));
+    builder
+        .client_transport_cfg
+        .default_path_max_idle_timeout(Some(Duration::from_secs(3)));
+    builder
+        .server_transport_cfg
+        .default_path_max_idle_timeout(Some(Duration::from_secs(3)));
+
+    let mut pair = builder.connect();
+    let remote = pair.routes.public_server_addr();
+    let secondary = pair.open_path(
+        Client,
+        FourTuple::from_remote(remote),
+        PathStatus::Available,
+    )?;
+    pair.drive_bounded(50);
+    assert_matches!(
+        pair.poll(Client),
+        Some(Event::Path(PathEvent::Established { id })) if id == secondary
+    );
+    assert_matches!(
+        pair.poll(Server),
+        Some(Event::Path(PathEvent::Established { id })) if id == secondary
+    );
+    let start = pair.time;
+    let mut steps = 0usize;
+    while pair.time - start < Duration::from_secs(12) {
+        if !pair.step() {
+            assert!(pair.advance_time(), "no pending timer during keepalive");
+        }
+        steps += 1;
+        assert!(steps < 5000, "event loop failed to advance");
+        for side in [Client, Server] {
+            while let Some(event) = pair.poll(side) {
+                assert!(
+                    !matches!(event, Event::Path(PathEvent::Abandoned { .. })),
+                    "backup path abandoned during keepalive-only traffic: {event:?}"
+                );
+            }
+        }
+    }
+    assert!(!pair.is_closed(Client) && !pair.is_closed(Server));
+    Ok(())
+}

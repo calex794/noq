@@ -740,8 +740,7 @@ impl Connection {
                 // The path has already been informed that outstanding acks should be sent
                 // immediately
                 PathTimer::MaxAckDelay => false,
-                // This timer should not be set, for completeness it's not kept as it's set when
-                // the PATH_ABANDON frame is sent.
+                // Locally abandoned paths arm this timer below after clearing old timers.
                 PathTimer::PathDrained => false,
                 // Sent packets still need to be identified as lost to trigger timely
                 // retransmission.
@@ -756,6 +755,23 @@ impl Connection {
                 let qlog = self.qlog.with_time(now);
                 self.timers.stop(Timer::PerPath(path_id, timer), qlog);
             }
+        }
+
+        // A locally abandoned path must eventually be discarded even if its peer
+        // never learned the path ID and cannot answer PATH_ABANDON. Keep the
+        // local drain separate from peer-directed path-id accounting and avoid
+        // arming a timer after the entire connection has closed.
+        if !self.state.is_closed()
+            && let Some(path) = self.paths.get_mut(&path_id)
+            && !mem::replace(&mut path.data.self_drain_armed, true)
+        {
+            let ack_delay = self.ack_frequency.max_ack_delay_for_pto();
+            let pto = path.data.rtt.pto_base() + ack_delay;
+            self.timers.set(
+                Timer::PerPath(path_id, PathTimer::PathDrained),
+                now + 3 * pto,
+                self.qlog.with_time(now),
+            );
         }
 
         // Set the loss detection timer again, as now it should only be set
@@ -3822,7 +3838,7 @@ impl Connection {
             .is_probably_same_path(remote);
 
         self.total_authed_packets += 1;
-        self.reset_keep_alive(path_id, now);
+        self.reset_conn_keep_alive(now);
         self.reset_idle_timeout(now, space_id, path_id);
         self.path_data_mut(path_id).permit_idle_reset = true;
 
@@ -3908,8 +3924,8 @@ impl Connection {
         self.rearm_path_max_idle_timer(now, space, path_id);
     }
 
-    /// Resets both the [`ConnTimer::KeepAlive`] and [`PathTimer::PathKeepAlive`] timers
-    fn reset_keep_alive(&mut self, path_id: PathId, now: Instant) {
+    /// Reset the connection-wide keep-alive after authenticated receive or transmit.
+    fn reset_conn_keep_alive(&mut self, now: Instant) {
         if !self.state.is_established() {
             return;
         }
@@ -3920,6 +3936,18 @@ impl Connection {
                 now + interval,
                 self.qlog.with_time(now),
             );
+        }
+    }
+
+    /// Reset both connection and per-path keep-alive after transmission.
+    ///
+    /// Incoming packets must not defer the path's own keep-alive: otherwise,
+    /// incoming PINGs can prevent us from sending on an idle backup path until
+    /// the peer expires it.
+    fn reset_keep_alive(&mut self, path_id: PathId, now: Instant) {
+        self.reset_conn_keep_alive(now);
+        if !self.state.is_established() {
+            return;
         }
 
         if let Some(interval) = self.path_data(path_id).keep_alive {
