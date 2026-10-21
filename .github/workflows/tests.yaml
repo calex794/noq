@@ -211,10 +211,18 @@ jobs:
           RUST_TOOLCHAIN: ${{ matrix.rust }}
           RUST_TARGET: ${{ matrix.target }}
         run: |
+          # `rustup toolchain default` is not a valid subcommand. The old
+          # PowerShell step silently ignored that error and tested with the
+          # runner's previously selected toolchain.
           rustup toolchain install $env:RUST_TOOLCHAIN
-          rustup toolchain default $env:RUST_TOOLCHAIN
+          if ($LASTEXITCODE -ne 0) { throw "Rust toolchain installation failed" }
+          rustup default $env:RUST_TOOLCHAIN
+          if ($LASTEXITCODE -ne 0) { throw "Rust toolchain selection failed" }
           rustup target add $env:RUST_TARGET
+          if ($LASTEXITCODE -ne 0) { throw "Rust target installation failed" }
           rustup set default-host $env:RUST_TARGET
+          if ($LASTEXITCODE -ne 0) { throw "Rust default host update failed" }
+          rustup show active-toolchain
 
       - name: Cache cargo-nextest
         id: cache-nextest
