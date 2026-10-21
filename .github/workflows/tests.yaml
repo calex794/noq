@@ -46,7 +46,7 @@ jobs:
             os: ubuntu-latest
             release-os: linux
             release-arch: amd64
-            runner: [self-hosted, linux, X64]
+            runner: ubuntu-latest
           - name: macOS-arm-latest
             os: macOS-latest
             release-os: darwin
@@ -57,6 +57,11 @@ jobs:
       # not SCCACHE_GHA_ENABLED.
       RUSTC_WRAPPER: "sccache"
     steps:
+      # Hosted runners are ephemeral; keep local sccache on self-hosted macOS.
+      - name: Use GitHub Actions sccache on hosted runners
+        if: ${{ runner.environment == 'github-hosted' }}
+        shell: bash
+        run: echo 'SCCACHE_GHA_ENABLED=on' >> "$GITHUB_ENV"
       - name: Checkout
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
@@ -182,7 +187,7 @@ jobs:
         include:
           - name: windows-latest
             os: windows
-            runner: [self-hosted, windows, x64]
+            runner: windows-latest
     env:
       # Using self-hosted runners so use local cache for sccache and
       # not SCCACHE_GHA_ENABLED.
@@ -190,6 +195,11 @@ jobs:
       # Force clang/bindgen to use MSVC target to avoid mingw headers from msys2
       BINDGEN_EXTRA_CLANG_ARGS: "--target=x86_64-pc-windows-msvc"
     steps:
+      # Hosted runners are ephemeral; keep local sccache on self-hosted macOS.
+      - name: Use GitHub Actions sccache on hosted runners
+        if: ${{ runner.environment == 'github-hosted' }}
+        shell: bash
+        run: echo 'SCCACHE_GHA_ENABLED=on' >> "$GITHUB_ENV"
       - name: Checkout
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
@@ -245,7 +255,7 @@ jobs:
 
       - uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884 # v2.32.0
         with:
-          release: false
+          release: ${{ runner.environment == 'github-hosted' }}
 
       # FIPS dependencies for Windows
       - name: Setup Go
@@ -373,6 +383,11 @@ jobs:
             release-arch: aarch64
             runner: macos-latest
     steps:
+      # Hosted runners are ephemeral; keep local sccache on self-hosted macOS.
+      - name: Use GitHub Actions sccache on hosted runners
+        if: ${{ runner.environment == 'github-hosted' }}
+        shell: bash
+        run: echo 'SCCACHE_GHA_ENABLED=on' >> "$GITHUB_ENV"
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           # Keep the token out of .git/config, readable by any build script.
@@ -398,8 +413,7 @@ jobs:
   minimal-crates-windows:
     timeout-minutes: 30
     name: "Minimal Crates (Windows)"
-    # Still self-hosted; moving to windows-latest needs sccache switched to
-    # SCCACHE_GHA_ENABLED. Follow-up.
+    # Windows minimal-crates can run on GitHub-hosted workers too.
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -413,7 +427,7 @@ jobs:
         include:
           - name: windows-latest
             os: windows
-            runner: [self-hosted, windows, x64]
+            runner: windows-latest
     env:
       # Using self-hosted runners so use local cache for sccache and
       # not SCCACHE_GHA_ENABLED.
@@ -421,6 +435,11 @@ jobs:
       # Force clang/bindgen to use MSVC target to avoid mingw headers from msys2
       BINDGEN_EXTRA_CLANG_ARGS: "--target=x86_64-pc-windows-msvc"
     steps:
+      # Hosted runners are ephemeral; keep local sccache on self-hosted macOS.
+      - name: Use GitHub Actions sccache on hosted runners
+        if: ${{ runner.environment == 'github-hosted' }}
+        shell: bash
+        run: echo 'SCCACHE_GHA_ENABLED=on' >> "$GITHUB_ENV"
       - name: Checkout
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
@@ -438,7 +457,7 @@ jobs:
 
       - uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884 # v2.32.0
         with:
-          release: false
+          release: ${{ runner.environment == 'github-hosted' }}
 
       - name: Install cmake
         uses: lukka/get-cmake@fffaaafeea488556c2c12dad60690008bc1caacb # v4.4.2
