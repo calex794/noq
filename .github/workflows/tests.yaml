@@ -470,13 +470,14 @@ jobs:
         env:
           INSTALLED_CMAKE: ${{ steps.cmake.outputs.cmake-path }}
         run: |
-          if (-not (Test-Path -LiteralPath $env:INSTALLED_CMAKE -PathType Leaf)) {
-            throw "get-cmake did not return a valid executable: $env:INSTALLED_CMAKE"
+          # get-cmake's cmake-path output is the *bin directory*, not cmake.exe.
+          $cmake = Join-Path $env:INSTALLED_CMAKE 'cmake.exe'
+          if (-not (Test-Path -LiteralPath $cmake -PathType Leaf)) {
+            throw "get-cmake did not provide cmake.exe: $cmake"
           }
-          $cmakeDir = Split-Path -Parent $env:INSTALLED_CMAKE
-          $cmakeDir | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-          "CMAKE=$env:INSTALLED_CMAKE" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          & $env:INSTALLED_CMAKE --version
+          $env:INSTALLED_CMAKE | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          "CMAKE=$cmake" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          & $cmake --version
           if ($LASTEXITCODE -ne 0) { throw "CMake executable cannot start" }
 
       - name: Install NASM
