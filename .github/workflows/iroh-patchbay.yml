@@ -2,6 +2,13 @@ name: iroh-patchbay
 
 on:
   pull_request:
+    # All code/dependency changes keep integration coverage. CI-only edits do
+    # not need a new Rust build. The final include tests this workflow itself.
+    paths:
+      - '**'
+      - '!.github/workflows/**'
+      - '!.github/scripts/**'
+      - '.github/workflows/iroh-patchbay.yml'
   merge_group:
   push:
     branches:
