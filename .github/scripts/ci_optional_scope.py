@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-"""Conservative PR-only selector for non-required CI work.
+"""Conservative PR/main-push selector for non-required CI work.
 
 Only unrelated workflow YAML and the read-only CI audit scripts can use the
 small matrix. Every ambiguity falls back to all tests. Required checks always
-run regardless of this selector.
+run regardless of this selector. Pushes with unknown ancestry run full CI.
 """
 from __future__ import annotations
 
 import os
+import re
 from pathlib import PurePosixPath
 import subprocess
 
@@ -57,9 +58,50 @@ def changed_paths_from_pr_merge() -> list[str] | None:
         names.pop()
     return [name.decode("utf-8") for name in names]
 
+def changed_paths_from_main_push() -> list[str] | None:
+    """Diff a trusted main push only when exact SHA/ancestry can be verified."""
+    if (os.environ.get("GITHUB_EVENT_NAME") != "push"
+            or os.environ.get("GITHUB_REF") != "refs/heads/main"):
+        return None
+    before = os.environ.get("PUSH_BEFORE_SHA", "")
+    after = os.environ.get("GITHUB_SHA", "")
+    if (not re.fullmatch(r"[0-9a-f]{40}", before)
+            or not re.fullmatch(r"[0-9a-f]{40}", after)
+            or before == "0" * 40 or before == after):
+        return None
+    checked_out = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], stderr=subprocess.DEVNULL,
+    ).decode("ascii").strip()
+    if checked_out != after:
+        return None
+    try:
+        subprocess.check_output(
+            ["git", "merge-base", "--is-ancestor", before, "HEAD"],
+            stderr=subprocess.DEVNULL,
+        )
+    except subprocess.CalledProcessError:
+        # Shallow history, a non-fast-forward update, or missing commit:
+        # none of these should authorize skipping any optional check.
+        return None
+    changed = subprocess.check_output(
+        ["git", "diff", "--no-renames", "--name-only", "-z", before, "HEAD"],
+        stderr=subprocess.DEVNULL,
+    )
+    names = changed.split(b"\0")
+    if names[-1:] == [b""]:
+        names.pop()
+    return [path.decode("utf-8") for path in names]
+
+
 def main() -> None:
     try:
-        full = full_matrix_needed(changed_paths_from_pr_merge())
+        if os.environ.get("GITHUB_EVENT_NAME") == "pull_request":
+            paths = changed_paths_from_pr_merge()
+        elif os.environ.get("GITHUB_EVENT_NAME") == "push":
+            paths = changed_paths_from_main_push()
+        else:
+            paths = None
+        full = full_matrix_needed(paths)
     except (OSError, ValueError, UnicodeError, subprocess.SubprocessError):
         full = True
     print(f"extended={'true' if full else 'false'}")
