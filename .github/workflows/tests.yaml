@@ -81,8 +81,10 @@ jobs:
           go-version: "stable"
 
       - name: Select features
+        env:
+          FEATURE_VARIANT: ${{ matrix.features }}
         run: |
-          case "${{ matrix.features }}" in
+          case "$FEATURE_VARIANT" in
               all)
                   echo "FEATURES=--all-features" >> "$GITHUB_ENV"
                   ;;
@@ -248,8 +250,10 @@ jobs:
           $tmp | Remove-Item
 
       - name: Select features
+        env:
+          FEATURE_VARIANT: ${{ matrix.features }}
         run: |
-          switch ("${{ matrix.features }}") {
+          switch ($Env:FEATURE_VARIANT) {
               "all" {
                   echo "FEATURES=--all-features" | Out-File -FilePath $Env:GITHUB_ENV -Encoding utf8 -Append
               }
