@@ -26,7 +26,9 @@ permissions:
 jobs:
   ci_scope:
     name: Identify optional CI scope
-    if: github.event_name == 'pull_request'
+    # The PR merge and main push paths are inspected separately; unknown
+    # events/history always fall back to the full matrix.
+    if: ${{ github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
     runs-on: ubuntu-latest
     outputs:
       extended: ${{ steps.scope.outputs.extended }}
@@ -41,6 +43,7 @@ jobs:
         id: scope
         env:
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
         run: python3 .github/scripts/ci_optional_scope.py >> "$GITHUB_OUTPUT"
   tests:
     name: CI Test Suite
