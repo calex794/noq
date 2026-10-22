@@ -1078,14 +1078,12 @@ impl Connection {
             _ => false,
         };
 
-        // Schedule an ACK_FREQUENCY frame if a new one needs to be sent.
-        if let Some(config) = &self.config.ack_frequency_config {
-            let rtt = self
-                .paths
-                .values()
-                .map(|p| p.data.rtt.get())
-                .min()
-                .expect("one path exists");
+        // Schedule an ACK_FREQUENCY frame only while a viable path exists.
+        // After the peer abandons the last path, NoAvailablePath may keep the
+        // connection pollable until its grace period expires (no RTT available).
+        if let Some(config) = &self.config.ack_frequency_config
+            && let Some(rtt) = self.paths.values().map(|p| p.data.rtt.get()).min()
+        {
             self.spaces[SpaceId::Data].pending.ack_frequency = self
                 .ack_frequency
                 .should_send_ack_frequency(rtt, config, &self.peer_params)
@@ -2469,7 +2467,10 @@ impl Connection {
     /// `Instant` that was output by `poll_timeout`; however spurious extra calls will simply
     /// no-op and therefore are safe.
     pub fn handle_timeout(&mut self, now: Instant) {
-        while let Some((timer, _time)) = self.timers.expire_before(now, &self.qlog) {
+        for timer in self.timers.expired(now) {
+            if !self.timers.expire(timer, now, &self.qlog) {
+                continue;
+            }
             let span = match timer {
                 Timer::Conn(timer) => trace_span!("timeout", scope = "conn", ?timer),
                 Timer::PerPath(path_id, timer) => {

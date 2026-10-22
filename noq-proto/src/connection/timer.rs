@@ -1,4 +1,3 @@
-#[cfg(test)]
 use alloc::vec::Vec;
 
 use identity_hash::{IdentityHashable, IntMap};
@@ -100,7 +99,7 @@ impl core::hash::Hash for PathIdKey {
 
 /// Keeps track of the nearest timeout for each `Timer`
 ///
-/// The [`TimerTable`] is advanced with [`TimerTable::expire_before`].
+/// The [`TimerTable`] is advanced with [`TimerTable::expired`] and [`TimerTable::expire`].
 #[derive(Debug, Clone, Default)]
 pub(crate) struct TimerTable {
     generic: [Option<Instant>; ConnTimer::VALUES.len()],
@@ -188,7 +187,6 @@ where
         self.heap.as_mut().and_then(|h| h.get_mut(key))
     }
 
-    #[cfg(test)]
     fn iter(&self) -> impl Iterator<Item = (&K, &V)> {
         let a = self
             .stack
@@ -204,6 +202,7 @@ where
         a.chain(b)
     }
 
+    #[cfg(test)]
     fn iter_mut(&mut self) -> impl Iterator<Item = (&K, &mut V)> {
         let a = self
             .stack
@@ -260,18 +259,7 @@ impl PathTimerTable {
         self.timers[timer as usize] = None;
     }
 
-    /// Remove the next timer up until `now`, including it
-    fn expire_before(&mut self, now: Instant) -> Option<(PathTimer, Instant)> {
-        for timer in PathTimer::VALUES {
-            if self.timers[timer as usize].is_some()
-                && self.timers[timer as usize].expect("checked") <= now
-            {
-                return self.timers[timer as usize].take().map(|time| (timer, time));
-            }
-        }
 
-        None
-    }
 }
 
 impl TimerTable {
@@ -360,42 +348,47 @@ impl TimerTable {
         }
     }
 
-    /// Remove the next timer up until `now`, including it
-    pub(super) fn expire_before(
-        &mut self,
-        now: Instant,
-        qlog: &QlogSink,
-    ) -> Option<(Timer, Instant)> {
-        let (timer, instant) = self.expire_before_inner(now)?;
-        qlog.with_time(now).emit_timer_expire(timer);
-        Some((timer, instant))
-    }
-
-    fn expire_before_inner(&mut self, now: Instant) -> Option<(Timer, Instant)> {
-        // TODO: this is currently linear in the number of paths
-
-        for timer in ConnTimer::VALUES {
-            if self.generic[timer as usize].is_some()
-                && self.generic[timer as usize].expect("checked") <= now
-            {
-                return self.generic[timer as usize]
-                    .take()
-                    .map(|time| (Timer::Conn(timer), time));
-            }
-        }
-
-        let mut res = None;
-        for (PathIdKey(path_id), timers) in self.path_timers.iter_mut() {
-            if let Some((timer, time)) = timers.expire_before(now) {
-                res = Some((Timer::PerPath(*path_id, timer), time));
-                break;
-            }
-        }
-
-        // clear out old timers
+    /// Returns a snapshot of timers due at `now`, in firing order.
+    ///
+    /// Taking the snapshot prevents a timeout that re-arms itself in the past
+    /// from being processed repeatedly before pending probe packets can be sent.
+    pub(super) fn expired(&mut self, now: Instant) -> Vec<Timer> {
+        // Drop path timer entries that have become empty.
         self.path_timers
             .retain(|_path_id, timers| timers.timers.iter().any(|t| t.is_some()));
-        res
+
+        let due = |time: Option<Instant>| time.is_some_and(|time| time <= now);
+        let connection = ConnTimer::VALUES
+            .into_iter()
+            .filter(|&timer| due(self.generic[timer as usize]))
+            .map(Timer::Conn);
+        let paths = self
+            .path_timers
+            .iter()
+            .flat_map(|(&PathIdKey(path_id), timers)| {
+                PathTimer::VALUES
+                    .into_iter()
+                    .filter(move |&timer| due(timers.get(timer)))
+                    .map(move |timer| Timer::PerPath(path_id, timer))
+            });
+        connection.chain(paths).collect()
+    }
+
+    /// Expire one timer only if still due. An earlier callback may stop or move it.
+    pub(super) fn expire(&mut self, timer: Timer, now: Instant, qlog: &QlogSink) -> bool {
+        if !self.get(timer).is_some_and(|time| time <= now) {
+            return false;
+        }
+        match timer {
+            Timer::Conn(timer) => self.generic[timer as usize] = None,
+            Timer::PerPath(path_id, timer) => {
+                if let Some(timers) = self.path_timers.get_mut(&PathIdKey(path_id)) {
+                    timers.stop(timer);
+                }
+            }
+        }
+        qlog.with_time(now).emit_timer_expire(timer);
+        true
     }
 
     pub(super) fn reset(&mut self) {
@@ -453,15 +446,35 @@ mod tests {
         );
 
         assert_eq!(timers.peek(), Some(now - 3 * sec));
-        assert_eq!(
-            timers.expire_before(now, &QlogSink::default()),
-            Some((Timer::Conn(ConnTimer::Idle), now - 3 * sec))
-        );
-        assert_eq!(
-            timers.expire_before(now, &QlogSink::default()),
-            Some((Timer::Conn(ConnTimer::Close), now - 2 * sec))
-        );
-        assert_eq!(timers.expire_before(now, &QlogSink::default()), None);
+        let idle = Timer::Conn(ConnTimer::Idle);
+        let close = Timer::Conn(ConnTimer::Close);
+        assert_eq!(timers.expired(now), [idle, close]);
+        assert!(timers.expire(idle, now, &QlogSink::default()));
+        assert!(!timers.expire(idle, now, &QlogSink::default()));
+        assert!(timers.expire(close, now, &QlogSink::default()));
+        assert!(timers.expired(now).is_empty());
+    }
+
+    #[test]
+    fn expired_snapshot_does_not_repeat_rearmed_timer() {
+        let mut timers = TimerTable::default();
+        let now = Instant::now();
+        let close = Timer::Conn(ConnTimer::Close);
+        let sink = QlogSink::default();
+        timers.set(close, now, sink.with_time(now));
+
+        let due = timers.expired(now);
+        assert_eq!(due, [close]);
+        for timer in due {
+            assert!(timers.expire(timer, now, &sink));
+            // A callback may schedule the same timer at a deadline already passed.
+            timers.set(timer, now, sink.with_time(now));
+        }
+
+        // The current batch has terminated. The rearmed timer is processed on
+        // the next handle_timeout call, when the driver has had a chance to poll.
+        assert_eq!(timers.expired(now), [close]);
+        assert_eq!(timers.peek(), Some(now));
     }
 
     #[test]
