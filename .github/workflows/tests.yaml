@@ -13,6 +13,10 @@ on:
         description: "Whether to also run flaky tests"
         type: boolean
         default: false
+      full_matrix:
+        description: "Run additional OS and feature combinations"
+        type: boolean
+        default: true
       git-ref:
         description: "Which git ref to checkout"
         type: string
@@ -34,24 +38,13 @@ jobs:
   build_and_test_nix:
     timeout-minutes: 30
     name: "Tests"
-    runs-on: ${{ matrix.runner }}
+    runs-on: ${{ matrix.name == 'macOS-arm-latest' && 'macos-latest' || matrix.name }}
     strategy:
       fail-fast: false
       matrix:
-        name: [ubuntu-latest, macOS-arm-latest]
+        name: ${{ fromJSON(inputs.full_matrix && '["ubuntu-latest","macOS-arm-latest"]' || '["ubuntu-latest"]') }}
         rust: ["${{ inputs.rust-version }}"]
-        features: [all, none, default]
-        include:
-          - name: ubuntu-latest
-            os: ubuntu-latest
-            release-os: linux
-            release-arch: amd64
-            runner: ubuntu-latest
-          - name: macOS-arm-latest
-            os: macOS-latest
-            release-os: darwin
-            release-arch: aarch64
-            runner: macos-latest
+        features: ${{ fromJSON(inputs.full_matrix && '["all","none","default"]' || '["default"]') }}
     env:
       # Using self-hosted runners so use local cache for sccache and
       # not SCCACHE_GHA_ENABLED.
@@ -194,7 +187,7 @@ jobs:
       matrix:
         name: [windows-latest]
         rust: ["${{ inputs.rust-version}}"]
-        features: [all, none, default]
+        features: ${{ fromJSON(inputs.full_matrix && '["all","none","default"]' || '["default"]') }}
         target:
           - x86_64-pc-windows-msvc
         include:
@@ -396,6 +389,7 @@ jobs:
           if ($failed) { exit 1 }
 
   minimal-crates:
+    if: ${{ inputs.full_matrix }}
     timeout-minutes: 45
     # Ephemeral only: this job runs build scripts from unvetted versions.
     runs-on: ${{ matrix.runner }}
@@ -445,6 +439,7 @@ jobs:
             --workspace --exclude fuzz --all-features --lib --bins
 
   minimal-crates-windows:
+    if: ${{ inputs.full_matrix }}
     timeout-minutes: 30
     name: "Minimal Crates (Windows)"
     # Windows minimal-crates can run on GitHub-hosted workers too.
