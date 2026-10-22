@@ -58,14 +58,19 @@ def workspace(root: Path) -> tuple[dict, dict, dict]:
                 for alias, spec in table.get(section, {}).items():
                     if not isinstance(spec, dict):
                         continue
+                    dependency_root = parent
                     if spec.get('workspace') is True:
                         inherited = root_deps.get(alias, {})
                         if isinstance(inherited, dict):
+                            # Inherited paths are relative to the workspace
+                            # manifest, not to the dependent crate.
+                            if 'path' in inherited and 'path' not in spec:
+                                dependency_root = root
                             spec = {**inherited, **spec}
                     path = spec.get('path')
                     if not path:
                         continue
-                    target = locations.get((parent / path).resolve())
+                    target = locations.get((dependency_root / path).resolve())
                     if not target:
                         continue  # outside the local Cargo workspace
                     kind = 'test-only' if section == 'dev-dependencies' else 'runtime'

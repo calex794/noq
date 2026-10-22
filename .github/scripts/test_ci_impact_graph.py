@@ -63,6 +63,35 @@ class CIImpactGraphTest(unittest.TestCase):
             self.assertTrue(result['selected_files']['Cargo.lock']['requires_full_gate'])
             self.assertIn('REPORT ONLY', result['safety'])
 
+    def test_inherited_workspace_path_uses_workspace_root(self):
+        tmp, root = self.fixture()
+        with tmp:
+            (root / 'Cargo.toml').write_text(
+                '[workspace]\nmembers = ["base", "middle", "app", "tool"]\n'
+                '[workspace.dependencies]\nshared = {path = "base", package = "base"}\n')
+            (root / 'middle' / 'Cargo.toml').write_text(
+                '[package]\nname = "middle"\nversion = "0.1.0"\n'
+                '[dependencies]\nshared = {workspace = true}\n')
+            _, deps, _ = mod.workspace(root)
+            self.assertEqual(deps['middle'], {'base': 'runtime'})
+            self.assertEqual(mod.dependents({'base'}, deps)['app'], 'runtime')
+
+    def test_test_only_path_can_upgrade_to_runtime(self):
+        dependencies = {
+            'base': {},
+            'test_bridge': {'base': 'test-only'},
+            'runtime_bridge': {'base': 'runtime'},
+            'leaf': {'test_bridge': 'runtime', 'runtime_bridge': 'runtime'},
+            'downstream': {'leaf': 'runtime'},
+        }
+        self.assertEqual(mod.dependents({'base'}, dependencies), {
+            'base': 'runtime',
+            'test_bridge': 'test-only',
+            'runtime_bridge': 'runtime',
+            'leaf': 'runtime',
+            'downstream': 'runtime',
+        })
+
     def test_target_specific_dependency_not_ignored(self):
         tmp, root = self.fixture()
         with tmp:
