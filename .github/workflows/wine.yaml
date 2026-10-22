@@ -4,6 +4,14 @@ on:
   push:
     branches: [main]
   pull_request:
+    # Keep Wine for code and dependency changes. Avoid rebuilding Windows/GNU
+    # tests when a PR only changes unrelated CI workflow/scripts.
+    # Include this file explicitly so changes to Wine itself are verified.
+    paths:
+      - '**'
+      - '!.github/workflows/**'
+      - '!.github/scripts/**'
+      - '.github/workflows/wine.yaml'
   workflow_dispatch:
 
 concurrency:
