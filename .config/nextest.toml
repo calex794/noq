@@ -27,3 +27,12 @@ default-filter = 'all()'
 filter = 'test(congestion::bbr3)'
 platform = 'cfg(target_env = "musl")'
 slow-timeout = { period = "5s", terminate-after = 5 }
+
+# The deterministic BBR3 simulator runs close to the default 15s deadline
+# on busy Windows runners (observed 14.893s PASS, 15.018s TIMEOUT).
+# Keep the test enabled, target only the affected case, and preserve the
+# 5s slow-test warnings. A genuine hang still fails after 25s.
+[[profile.ci.overrides]]
+filter = 'test(probe_bw_exits_probe_down_to_probe_cruise_on_inflight)'
+platform = 'cfg(target_os = "windows")'
+slow-timeout = { period = "5s", terminate-after = 5 }

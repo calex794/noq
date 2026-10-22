@@ -165,12 +165,25 @@ jobs:
           done
 
       - uses: taiki-e/install-action@b20dedce73af6905cdc30d6611090c9b67557c8d # v2.85.12
+        if: ${{ ! inputs.flaky && matrix.features == 'default' }}
         with:
           tool: cargo-make
 
-      - name: run proptests (1 minute minimum)
-        if: ${{ ! inputs.flaky }}
-        run: cargo make proptests-light
+      # The proptests-light task always selects the same default-features
+      # noq-proto and proptests Cargo profile, regardless of matrix.features.
+      # Run the same 3 independent 10,000-case trials in one matrix cell so
+      # the expensive optimized test binary is compiled once per runner/OS.
+      - name: Run proptests (3 independent trials, 10000 cases each)
+        if: ${{ ! inputs.flaky && matrix.features == 'default' }}
+        shell: bash
+        run: |
+          failed=0
+          for trial in 1 2 3; do
+            echo "::group::proptests trial ${trial}/3"
+            cargo make proptests-light || failed=1
+            echo "::endgroup::"
+          done
+          exit "$failed"
 
   build_and_test_windows:
     timeout-minutes: 30
@@ -211,10 +224,18 @@ jobs:
           RUST_TOOLCHAIN: ${{ matrix.rust }}
           RUST_TARGET: ${{ matrix.target }}
         run: |
+          # `rustup toolchain default` is not a valid subcommand. The old
+          # PowerShell step silently ignored that error and tested with the
+          # runner's previously selected toolchain.
           rustup toolchain install $env:RUST_TOOLCHAIN
-          rustup toolchain default $env:RUST_TOOLCHAIN
+          if ($LASTEXITCODE -ne 0) { throw "Rust toolchain installation failed" }
+          rustup default $env:RUST_TOOLCHAIN
+          if ($LASTEXITCODE -ne 0) { throw "Rust toolchain selection failed" }
           rustup target add $env:RUST_TARGET
+          if ($LASTEXITCODE -ne 0) { throw "Rust target installation failed" }
           rustup set default-host $env:RUST_TARGET
+          if ($LASTEXITCODE -ne 0) { throw "Rust default host update failed" }
+          rustup show active-toolchain
 
       - name: Cache cargo-nextest
         id: cache-nextest
@@ -347,6 +368,7 @@ jobs:
           compression-level: 0
 
       - name: Cache cargo-make
+        if: ${{ ! inputs.flaky && matrix.features == 'default' }}
         id: cache-cargo-make
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
@@ -354,12 +376,24 @@ jobs:
           key: cargo-make-windows-0.37.24
 
       - name: Install cargo-make
-        if: steps.cache-cargo-make.outputs.cache-hit != 'true'
+        if: ${{ ! inputs.flaky && matrix.features == 'default' && steps.cache-cargo-make.outputs.cache-hit != 'true' }}
         run: cargo install cargo-make --version 0.37.24 --locked
 
-      - name: run proptests (1 minute minimum)
-        if: ${{ ! inputs.flaky }}
-        run: cargo make proptests-light
+      # Feature variants of the normal test matrix must still run, but
+      # proptests-light never consumes matrix.features. Preserve all 3
+      # separately seeded 10,000-case trials in the default-features cell.
+      - name: Run proptests (3 independent trials, 10000 cases each)
+        if: ${{ ! inputs.flaky && matrix.features == 'default' }}
+        shell: pwsh
+        run: |
+          $failed = $false
+          foreach ($trial in 1..3) {
+            Write-Host "::group::proptests trial $trial/3"
+            cargo make proptests-light
+            if ($LASTEXITCODE -ne 0) { $failed = $true }
+            Write-Host "::endgroup::"
+          }
+          if ($failed) { exit 1 }
 
   minimal-crates:
     timeout-minutes: 45
@@ -460,7 +494,25 @@ jobs:
           release: ${{ runner.environment == 'github-hosted' }}
 
       - name: Install cmake
+        id: cmake
         uses: lukka/get-cmake@fffaaafeea488556c2c12dad60690008bc1caacb # v4.4.2
+
+      # aws-lc-fips-sys invokes CMake from its Rust build script. The action
+      # can locate CMake even when the subsequent build process cannot.
+      - name: Expose and verify CMake for the FIPS build
+        shell: pwsh
+        env:
+          INSTALLED_CMAKE: ${{ steps.cmake.outputs.cmake-path }}
+        run: |
+          # get-cmake's cmake-path output is the *bin directory*, not cmake.exe.
+          $cmake = Join-Path $env:INSTALLED_CMAKE 'cmake.exe'
+          if (-not (Test-Path -LiteralPath $cmake -PathType Leaf)) {
+            throw "get-cmake did not provide cmake.exe: $cmake"
+          }
+          $env:INSTALLED_CMAKE | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          "CMAKE=$cmake" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          & $cmake --version
+          if ($LASTEXITCODE -ne 0) { throw "CMake executable cannot start" }
 
       - name: Install NASM
         uses: ilammy/setup-nasm@72793074d3c8cdda771dba85f6deafe00623038b # v1.5.2
