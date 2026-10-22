@@ -3,8 +3,9 @@
 name: workflow lint
 
 on:
+  # zizmor is a required status on main: do not filter pull requests by path.
+  # Source-only and script-only changes must receive this check as well.
   pull_request:
-    paths: ['.github/workflows/**']
   push:
     branches: [main]
     paths: ['.github/workflows/**']
