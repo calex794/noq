@@ -151,6 +151,14 @@ def pr_workflows(root: Path) -> list[dict]:
             if inline:
                 events.update(x.strip() for x in inline.group(1).split(','))
                 break
+            # GitHub Actions also accepts a single event as an unquoted
+            # YAML scalar (on: pull_request). Do not silently omit it.
+            scalar = re.fullmatch(
+                r'on:\s*(pull_request|pull_request_target)\s*(?:#.*)?', line
+            )
+            if scalar:
+                events.add(scalar.group(1))
+                break
             if in_on:
                 if line and not line.startswith((' ', '#')):
                     break

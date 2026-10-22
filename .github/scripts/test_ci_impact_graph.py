@@ -63,6 +63,27 @@ class CIImpactGraphTest(unittest.TestCase):
             self.assertTrue(result['selected_files']['Cargo.lock']['requires_full_gate'])
             self.assertIn('REPORT ONLY', result['safety'])
 
+    def test_scalar_pr_workflow_triggers_are_visible(self):
+        tmp, root = self.fixture()
+        with tmp:
+            workflows = root / '.github' / 'workflows'
+            (workflows / 'scalar.yml').write_text(
+                'name: Scalar PR\non: pull_request\njobs:\n'
+                '  check:\n    runs-on: ubuntu-latest\n'
+            )
+            (workflows / 'target.yaml').write_text(
+                'on: pull_request_target # valid inline comment\njobs:\n'
+                '  check:\n    runs-on: ubuntu-latest\n'
+            )
+            (workflows / 'push.yml').write_text(
+                'on: push\njobs:\n  check:\n    runs-on: ubuntu-latest\n'
+            )
+            found = {item['workflow']: item['scope']
+                     for item in mod.pr_workflows(root)}
+            self.assertEqual(found['.github/workflows/scalar.yml'], 'unfiltered')
+            self.assertEqual(found['.github/workflows/target.yaml'], 'unfiltered')
+            self.assertNotIn('.github/workflows/push.yml', found)
+
     def test_inherited_workspace_path_uses_workspace_root(self):
         tmp, root = self.fixture()
         with tmp:
