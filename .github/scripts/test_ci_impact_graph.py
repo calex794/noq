@@ -84,6 +84,29 @@ class CIImpactGraphTest(unittest.TestCase):
             self.assertEqual(found['.github/workflows/target.yaml'], 'unfiltered')
             self.assertNotIn('.github/workflows/push.yml', found)
 
+    def test_inline_event_lists_include_pr_and_target(self):
+        # A one-line "on: [push, pull_request]" must not disappear
+        # from the audit merely because it lacks an indented on: mapping.
+        tmp, root = self.fixture()
+        with tmp:
+            workflows = root / '.github' / 'workflows'
+            (workflows / 'inline-pr.yml').write_text(
+                'on: [push, pull_request]\njobs:\n'
+                '  check:\n    runs-on: ubuntu-latest\n')
+            (workflows / 'inline-target.yaml').write_text(
+                'on: [workflow_dispatch, pull_request_target]\njobs:\n'
+                '  check:\n    runs-on: ubuntu-latest\n')
+            (workflows / 'inline-no-pr.yml').write_text(
+                'on: [push, workflow_dispatch]\njobs:\n'
+                '  check:\n    runs-on: ubuntu-latest\n')
+            found = {item['workflow']: item['scope']
+                     for item in mod.pr_workflows(root)}
+            self.assertEqual(found['.github/workflows/inline-pr.yml'],
+                             'unfiltered')
+            self.assertEqual(found['.github/workflows/inline-target.yaml'],
+                             'unfiltered')
+            self.assertNotIn('.github/workflows/inline-no-pr.yml', found)
+
     def test_inherited_workspace_path_uses_workspace_root(self):
         tmp, root = self.fixture()
         with tmp:
