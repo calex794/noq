@@ -2,6 +2,13 @@ name: Docs Preview
 
 on:
   pull_request:
+    # No Rust documentation changes in workflow/script-only PRs. The final
+    # positive pattern preserves previews when this workflow itself changes.
+    paths:
+      - '**'
+      - '!.github/workflows/**'
+      - '!.github/scripts/**'
+      - '.github/workflows/docs.yaml'
   workflow_dispatch:
     inputs:
       pr_number:
