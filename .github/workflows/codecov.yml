@@ -11,6 +11,14 @@ on:
       - '.github/workflows/codecov.yml'
   push:
     branches: ['main']
+    # Source/dependency changes still run this build; infrastructure-only
+    # main pushes were already validated by their required PR checks.
+    # Re-include this workflow so edits to its own config run it.
+    paths:
+      - '**'
+      - '!.github/workflows/**'
+      - '!.github/scripts/**'
+      - '.github/workflows/codecov.yml'
 
 # Default to read-only; jobs that need more grant it explicitly.
 permissions:
