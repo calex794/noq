@@ -284,7 +284,26 @@ jobs:
       - name: Install NASM
         uses: ilammy/setup-nasm@72793074d3c8cdda771dba85f6deafe00623038b # v1.5.2
 
+      # Hosted Windows 2025 images include Strawberry Perl and libclang.
+      # Only unchanged-code CI uses native tools; fall back to pinned ones if
+      # either is missing. Full CI keeps the original pinned setup.
+      - name: Detect preinstalled Windows FIPS tools
+        id: native-build-tools
+        if: ${{ ! inputs.full_matrix && runner.environment == 'github-hosted' }}
+        shell: pwsh
+        run: |
+          $perl = "C:\Strawberry\perl\bin\perl.exe"
+          $libclang = "C:\Program Files\LLVM\bin\libclang.dll"
+          if ((Test-Path $perl) -and (Test-Path $libclang)) {
+            "ready=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+            Write-Host "Using native hosted image tools"
+          } else {
+            "ready=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+            Write-Host "Falling back to pinned Perl/LLVM cache"
+          }
+
       - name: Cache Strawberry Perl
+        if: ${{ inputs.full_matrix || steps.native-build-tools.outputs.ready != 'true' }}
         id: cache-perl
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
@@ -292,7 +311,7 @@ jobs:
           key: strawberry-perl-5.38.2.2
 
       - name: Install Strawberry Perl
-        if: steps.cache-perl.outputs.cache-hit != 'true'
+        if: ${{ (inputs.full_matrix || steps.native-build-tools.outputs.ready != 'true') && steps.cache-perl.outputs.cache-hit != 'true' }}
         run: |
           Invoke-WebRequest -Uri "https://github.com/StrawberryPerl/Perl-Dist-Strawberry/releases/download/SP_53822_64bit/strawberry-perl-5.38.2.2-64bit-portable.zip" -OutFile perl.zip
           Expand-Archive perl.zip -DestinationPath C:\Strawberry -Force
@@ -307,6 +326,7 @@ jobs:
 
       # Install LLVM for libclang (required by bindgen for aws-lc-fips-sys)
       - name: Cache LLVM
+        if: ${{ inputs.full_matrix || steps.native-build-tools.outputs.ready != 'true' }}
         id: cache-llvm
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
@@ -314,7 +334,7 @@ jobs:
           key: llvm-17.0.6-windows
 
       - name: Install LLVM
-        if: steps.cache-llvm.outputs.cache-hit != 'true'
+        if: ${{ (inputs.full_matrix || steps.native-build-tools.outputs.ready != 'true') && steps.cache-llvm.outputs.cache-hit != 'true' }}
         run: |
           $llvmUrl = "https://github.com/llvm/llvm-project/releases/download/llvmorg-17.0.6/LLVM-17.0.6-win64.exe"
           Invoke-WebRequest -Uri $llvmUrl -OutFile llvm-installer.exe
