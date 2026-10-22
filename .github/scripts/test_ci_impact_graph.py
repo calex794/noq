@@ -1,4 +1,5 @@
 """Offline regression tests for the read-only CI impact graph."""
+# CI-only probe: verify reduced Windows default on #24 base uses hosted tools.
 import importlib.util
 from pathlib import Path
 import tempfile
