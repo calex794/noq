@@ -92,6 +92,7 @@ class CIImpactGraphTest(unittest.TestCase):
             'downstream': 'runtime',
         })
 
+    # Exercise the existing audit checks under the reduced CI path.
     def test_target_specific_dependency_not_ignored(self):
         tmp, root = self.fixture()
         with tmp:
