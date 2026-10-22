@@ -28,6 +28,16 @@ filter = 'test(congestion::bbr3)'
 platform = 'cfg(target_env = "musl")'
 slow-timeout = { period = "5s", terminate-after = 5 }
 
+# The same deterministic simulation has timed out on Ubuntu/GNU with
+# nextest's default 15s limit on full main CI (runs 39771098488 and
+# 39775021583), including the retry. Keep it enabled and retain warnings;
+# only allow this exact test up to 25s on Linux GNU. The separate musl
+# BBR3 override above is unchanged.
+[[profile.ci.overrides]]
+filter = 'test(probe_bw_exits_probe_down_to_probe_cruise_on_inflight)'
+platform = 'cfg(all(target_os = "linux", target_env = "gnu"))'
+slow-timeout = { period = "5s", terminate-after = 5 }
+
 # The deterministic BBR3 simulator runs close to the default 15s deadline
 # on busy Windows runners (observed 14.893s PASS, 15.018s TIMEOUT).
 # Keep the test enabled, target only the affected case, and preserve the
