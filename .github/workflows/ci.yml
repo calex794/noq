@@ -24,14 +24,37 @@ permissions:
   contents: read
 
 jobs:
+  ci_scope:
+    name: Identify optional CI scope
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    outputs:
+      extended: ${{ steps.scope.outputs.extended }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Validate conservative scope policy
+        run: python3 -m unittest discover -s .github/scripts -p test_ci_optional_scope.py -v
+      - name: Choose optional CI scope (fail open)
+        id: scope
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: python3 .github/scripts/ci_optional_scope.py >> "$GITHUB_OUTPUT"
   tests:
     name: CI Test Suite
-    if: "github.event_name != 'pull_request' || ! contains(github.event.pull_request.labels.*.name, 'flaky-test')"
+    needs: ci_scope
+    # Required default Ubuntu/Windows must run even when scope fails.
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || !contains(github.event.pull_request.labels.*.name, 'flaky-test')) }}
     uses: "$/.github/workflows/tests.yaml"
+    with:
+      full_matrix: ${{ needs.ci_scope.result != 'success' || needs.ci_scope.outputs.extended != 'false' }}
 
   test-aws-lc-rs:
+    needs: ci_scope
     name: Test aws-lc-rs crypto backend
-    if: "github.event_name != 'pull_request' || ! contains(github.event.pull_request.labels.*.name, 'flaky-test')"
+    if: ${{ !cancelled() && (needs.ci_scope.result != 'success' || needs.ci_scope.outputs.extended != 'false') && (github.event_name != 'pull_request' || !contains(github.event.pull_request.labels.*.name, 'flaky-test')) }}
     timeout-minutes: 30
     runs-on: ubuntu-latest
     env:
@@ -57,8 +80,9 @@ jobs:
       - run: RUST_BACKTRACE=1 cargo test --locked --manifest-path noq/Cargo.toml --no-default-features --features rustls,aws-lc-rs-fips,runtime-tokio,__rustls-post-quantum-test
 
   test_posix_minimal:
+    needs: ci_scope
     name: Test posix_minimal (noq-udp)
-    if: "github.event_name != 'pull_request' || ! contains(github.event.pull_request.labels.*.name, 'flaky-test')"
+    if: ${{ !cancelled() && (needs.ci_scope.result != 'success' || needs.ci_scope.outputs.extended != 'false') && (github.event_name != 'pull_request' || !contains(github.event.pull_request.labels.*.name, 'flaky-test')) }}
     timeout-minutes: 30
     runs-on: ubuntu-latest
     env:
@@ -77,8 +101,9 @@ jobs:
         run: cargo test --locked -p noq-udp
 
   test_musl:
+    needs: ci_scope
     name: Test ${{ matrix.target }}
-    if: "github.event_name != 'pull_request' || ! contains(github.event.pull_request.labels.*.name, 'flaky-test')"
+    if: ${{ !cancelled() && (needs.ci_scope.result != 'success' || needs.ci_scope.outputs.extended != 'false') && (github.event_name != 'pull_request' || !contains(github.event.pull_request.labels.*.name, 'flaky-test')) }}
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -122,8 +147,9 @@ jobs:
           RUST_LOG: ${{ runner.debug && 'TRACE' || 'DEBUG'}}
 
   esp32_check:
+    needs: ci_scope
     name: ESP32-C3 build check (noq-udp, noq-proto, noq)
-    if: "github.event_name != 'pull_request' || ! contains(github.event.pull_request.labels.*.name, 'flaky-test')"
+    if: ${{ !cancelled() && (needs.ci_scope.result != 'success' || needs.ci_scope.outputs.extended != 'false') && (github.event_name != 'pull_request' || !contains(github.event.pull_request.labels.*.name, 'flaky-test')) }}
     timeout-minutes: 30
     runs-on: ubuntu-latest
     env:
@@ -144,8 +170,9 @@ jobs:
         run: cargo check --locked -Z build-std=std,panic_abort --target riscv32imc-esp-espidf -p noq -p noq-proto -p noq-udp --no-default-features
 
   wasm_test:
+    needs: ci_scope
     name: Build & test wasm32
-    if: "github.event_name != 'pull_request' || ! contains(github.event.pull_request.labels.*.name, 'flaky-test')"
+    if: ${{ !cancelled() && (needs.ci_scope.result != 'success' || needs.ci_scope.outputs.extended != 'false') && (github.event_name != 'pull_request' || !contains(github.event.pull_request.labels.*.name, 'flaky-test')) }}
     timeout-minutes: 30
     runs-on: ubuntu-latest
     env:
@@ -196,8 +223,9 @@ jobs:
         run: cargo test --locked -p noq-proto --target wasm32-unknown-unknown
 
   android_build:
+    needs: ci_scope
     name: Android Build Only
-    if: "github.event_name != 'pull_request' || ! contains(github.event.pull_request.labels.*.name, 'flaky-test')"
+    if: ${{ !cancelled() && (needs.ci_scope.result != 'success' || needs.ci_scope.outputs.extended != 'false') && (github.event_name != 'pull_request' || !contains(github.event.pull_request.labels.*.name, 'flaky-test')) }}
     timeout-minutes: 30
     runs-on: ubuntu-latest
     strategy:
@@ -249,8 +277,9 @@ jobs:
         run: cargo ndk --target ${{ matrix.target }} build --locked
 
   android_emulator_test:
+    needs: ci_scope
     name: Android Emulator Tests
-    if: "github.event_name != 'pull_request' || ! contains(github.event.pull_request.labels.*.name, 'flaky-test')"
+    if: ${{ !cancelled() && (needs.ci_scope.result != 'success' || needs.ci_scope.outputs.extended != 'false') && (github.event_name != 'pull_request' || !contains(github.event.pull_request.labels.*.name, 'flaky-test')) }}
     timeout-minutes: 45
     runs-on: ubuntu-latest
     strategy:
@@ -321,8 +350,9 @@ jobs:
           script: .github/workflows/rust-android-run-tests-on-emulator.sh
 
   fuzz_build:
+    needs: ci_scope
     name: Fuzz build check
-    if: "github.event_name != 'pull_request' || ! contains(github.event.pull_request.labels.*.name, 'flaky-test')"
+    if: ${{ !cancelled() && (needs.ci_scope.result != 'success' || needs.ci_scope.outputs.extended != 'false') && (github.event_name != 'pull_request' || !contains(github.event.pull_request.labels.*.name, 'flaky-test')) }}
     timeout-minutes: 30
     runs-on: ubuntu-latest
     steps:
@@ -368,6 +398,8 @@ jobs:
         run: git diff --exit-code Cargo.lock
 
   check_docs:
+    needs: ci_scope
+    if: ${{ !cancelled() && (needs.ci_scope.result != 'success' || needs.ci_scope.outputs.extended != 'false') }}
     timeout-minutes: 30
     name: Checking docs
     runs-on: ubuntu-latest
@@ -423,7 +455,8 @@ jobs:
         run: cargo clippy --locked --workspace --exclude fuzz --all-targets --lib --bins --tests --benches --examples -- -D warnings
 
   msrv:
-    if: "github.event_name != 'pull_request' || ! contains(github.event.pull_request.labels.*.name, 'flaky-test')"
+    needs: ci_scope
+    if: ${{ !cancelled() && (needs.ci_scope.result != 'success' || needs.ci_scope.outputs.extended != 'false') && (github.event_name != 'pull_request' || !contains(github.event.pull_request.labels.*.name, 'flaky-test')) }}
     timeout-minutes: 30
     name: Minimal Supported Rust Version
     runs-on: ubuntu-latest
@@ -445,6 +478,8 @@ jobs:
           cargo +$MSRV check --locked --workspace --exclude fuzz --all-targets
 
   external_types:
+    needs: ci_scope
+    if: ${{ !cancelled() && (needs.ci_scope.result != 'success' || needs.ci_scope.outputs.extended != 'false') }}
     runs-on: ubuntu-latest
     env:
       RUSTC_WRAPPER: "sccache"
@@ -504,6 +539,8 @@ jobs:
       - run: codespell --ignore-words-list=ans,atmost,crate,ect,inout,keep-alives,ser,te,worl --skip=CHANGELOG.md,*.lock
 
   check_semver:
+    needs: ci_scope
+    if: ${{ !cancelled() && (needs.ci_scope.result != 'success' || needs.ci_scope.outputs.extended != 'false') }}
     runs-on: ubuntu-latest
     env:
       RUSTC_WRAPPER: "sccache"
