@@ -13,6 +13,14 @@ on:
   push:
     branches:
       - main
+    # Source/dependency changes still run this build; infrastructure-only
+    # main pushes were already validated by their required PR checks.
+    # Re-include this workflow so edits to its own config run it.
+    paths:
+      - '**'
+      - '!.github/workflows/**'
+      - '!.github/scripts/**'
+      - '.github/workflows/iroh-patchbay.yml'
 
 concurrency:
   group: iroh-patchbay-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
